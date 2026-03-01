@@ -20,6 +20,10 @@ pub struct CylinderState {
     pub prev_volume: f64,
     /// Previous step burn fraction (for incremental heat release).
     pub prev_burn_fraction: f64,
+    /// Pressure captured at exhaust valve opening (blowdown start) in Pa.
+    pub blowdown_pressure: f64,
+    /// Temperature captured at exhaust valve opening (blowdown start) in K.
+    pub blowdown_temperature: f64,
 }
 
 impl CylinderState {
@@ -34,6 +38,8 @@ impl CylinderState {
             volume,
             prev_volume: volume,
             prev_burn_fraction: 0.0,
+            blowdown_pressure: config.ambient_pressure,
+            blowdown_temperature: config.ambient_temperature,
         }
     }
 

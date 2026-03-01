@@ -22,7 +22,7 @@ export class ForceArrows {
   private group: THREE.Group;
   private _visible = true;
 
-  constructor(scene: THREE.Scene, _scale: number) {
+  constructor(parent: THREE.Object3D, _scale: number) {
     const origin = new THREE.Vector3(0, 0, 1);
     const dir = new THREE.Vector3(0, -1, 0);
 
@@ -32,7 +32,7 @@ export class ForceArrows {
 
     this.group = new THREE.Group();
     this.group.add(this.gasArrow, this.inertiaArrow, this.frictionArrow);
-    scene.add(this.group);
+    parent.add(this.group);
   }
 
   update(
@@ -71,7 +71,4 @@ export class ForceArrows {
     return this._visible;
   }
 
-  setGroupOffset(x: number): void {
-    this.group.position.x = x;
-  }
 }

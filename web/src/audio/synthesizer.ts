@@ -5,6 +5,9 @@
  * Per-cylinder firing detection for multi-cylinder support.
  */
 
+import { ExhaustSystem } from "./exhaust-system";
+import { defaultExhaustConfig, type ExhaustSystemConfig } from "./exhaust-config";
+
 const ATM = 101325; // atmospheric pressure in Pa
 
 export interface CylinderAudio {
@@ -14,6 +17,8 @@ export interface CylinderAudio {
   exhaust_valve_lift: number;   // meters
   burn_fraction: number;        // [0,1]
   cylinder_pressure: number;    // Pa
+  exhaust_pulse_intensity: number; // [0,1]
+  exhaust_gas_temp: number;     // K
 }
 
 export interface SynthParams {
@@ -73,6 +78,7 @@ export class EngineSynthesizer {
   private mechSource: AudioBufferSourceNode | null = null;
   private valveFilter: BiquadFilterNode | null = null;
   private valveGain: GainNode | null = null;
+  private valveBus: GainNode | null = null; // Bus for valve train + valve clicks
   private pistonFilter: BiquadFilterNode | null = null;
   private pistonGain: GainNode | null = null;
 
@@ -85,6 +91,9 @@ export class EngineSynthesizer {
   private valveClickSource: AudioBufferSourceNode | null = null;
   private valveClickFilter: BiquadFilterNode | null = null;
   private valveClickGain: GainNode | null = null;
+
+  // Exhaust system
+  private exhaustSystem: ExhaustSystem | null = null;
 
   // Per-cylinder combustion tracking for firing edge detection
   private prevCombPerCyl: number[] = [];
@@ -168,6 +177,10 @@ export class EngineSynthesizer {
     this.intakeSource.start();
 
     // --- Mechanical noise: valve train chain ---
+    this.valveBus = ctx.createGain();
+    this.valveBus.gain.value = 1.0;
+    this.valveBus.connect(this.masterGain);
+
     this.valveFilter = ctx.createBiquadFilter();
     this.valveFilter.type = "bandpass";
     this.valveFilter.frequency.value = 3500;
@@ -176,7 +189,7 @@ export class EngineSynthesizer {
     this.valveGain = ctx.createGain();
     this.valveGain.gain.value = 0;
     this.valveFilter.connect(this.valveGain);
-    this.valveGain.connect(this.masterGain);
+    this.valveGain.connect(this.valveBus);
 
     // --- Mechanical noise: piston/wrist pin chain ---
     this.pistonFilter = ctx.createBiquadFilter();
@@ -223,7 +236,7 @@ export class EngineSynthesizer {
     this.valveClickGain = ctx.createGain();
     this.valveClickGain.gain.value = 0;
     this.valveClickFilter.connect(this.valveClickGain);
-    this.valveClickGain.connect(this.masterGain);
+    this.valveClickGain.connect(this.valveBus!); // Route through valve train bus
 
     this.valveClickSource = ctx.createBufferSource();
     this.valveClickSource.buffer = noiseBuffer;
@@ -231,11 +244,16 @@ export class EngineSynthesizer {
     this.valveClickSource.connect(this.valveClickFilter);
     this.valveClickSource.start();
 
+    // --- Exhaust system ---
+    this.exhaustSystem = new ExhaustSystem(ctx, noiseBuffer, defaultExhaustConfig());
+    this.exhaustSystem.getOutput().connect(this.masterGain);
+
     // --- Build channel registry ---
     this._channels = [
       { id: "combustion", label: "Combustion", color: "#ef4444", enabled: true, volume: 1.0, gainNode: this.combustionBus },
+      { id: "exhaust",    label: "Exhaust",    color: "#f97316", enabled: true, volume: 1.0, gainNode: this.exhaustSystem.getOutput() },
       { id: "intake",     label: "Intake",     color: "#60a5fa", enabled: true, volume: 1.0, gainNode: this.intakeGain },
-      { id: "valve",      label: "Valve Train", color: "#fbbf24", enabled: true, volume: 1.0, gainNode: this.valveGain },
+      { id: "valve",      label: "Valve Train", color: "#fbbf24", enabled: true, volume: 1.0, gainNode: this.valveBus },
       { id: "piston",     label: "Piston",     color: "#a78bfa", enabled: true, volume: 1.0, gainNode: this.pistonGain },
       { id: "compression", label: "Compression", color: "#38bdf8", enabled: true, volume: 1.0, gainNode: this.compGain },
     ];
@@ -415,6 +433,11 @@ export class EngineSynthesizer {
       g.setValueAtTime(clickGain, t);
       g.exponentialRampToValueAtTime(0.001, t + 0.003);
     }
+
+    // --- Exhaust system ---
+    if (this.exhaustSystem && this.channelEnabled("exhaust")) {
+      this.exhaustSystem.update(rpm, cyls, this.channelVolume("exhaust"));
+    }
   }
 
   setVolume(volume: number): void {
@@ -458,16 +481,17 @@ export class EngineSynthesizer {
     return this._channels.map(({ id, label, color, enabled, volume }) => ({ id, label, color, enabled, volume }));
   }
 
+  /** Channels whose gainNode is a bus (not modulated in update loop). */
+  private static BUS_CHANNELS = new Set(["combustion", "valve", "exhaust"]);
+
   setChannelEnabled(channel: string, enabled: boolean): void {
     const ch = this._channels.find((c) => c.id === channel);
     if (!ch) return;
     ch.enabled = enabled;
     if (ch.gainNode && this.ctx) {
-      // For combustion bus, toggle between volume and 0; for others the update() loop handles it,
-      // but we still zero the gain node immediately for a clean mute.
       if (!enabled) {
         ch.gainNode.gain.setTargetAtTime(0, this.ctx.currentTime, 0.02);
-      } else if (channel === "combustion") {
+      } else if (EngineSynthesizer.BUS_CHANNELS.has(channel)) {
         ch.gainNode.gain.setTargetAtTime(ch.volume, this.ctx.currentTime, 0.02);
       }
     }
@@ -478,12 +502,19 @@ export class EngineSynthesizer {
     if (!ch) return;
     ch.volume = Math.max(0, Math.min(1, volume));
     if (ch.gainNode && this.ctx && ch.enabled) {
-      // Combustion bus gain is the channel volume; others are modulated in update()
-      if (channel === "combustion") {
+      // Bus channels control gain directly; others are modulated as multipliers in update()
+      if (EngineSynthesizer.BUS_CHANNELS.has(channel)) {
         ch.gainNode.gain.setTargetAtTime(ch.volume, this.ctx.currentTime, 0.02);
       }
-      // For non-combustion channels, volume is applied as a multiplier in update()
     }
+  }
+
+  setExhaustConfig(config: ExhaustSystemConfig): void {
+    this.exhaustSystem?.applyConfig(config);
+  }
+
+  getExhaustConfig(): ExhaustSystemConfig | null {
+    return this.exhaustSystem ? structuredClone(this.exhaustSystem["config"]) : null;
   }
 
   dispose(): void {
@@ -493,9 +524,11 @@ export class EngineSynthesizer {
     this.mechSource?.stop();
     this.compSource?.stop();
     this.valveClickSource?.stop();
+    this.exhaustSystem?.dispose();
     this.ctx?.close();
     this.combOsc = [];
     this.combGains = [];
+    this.exhaustSystem = null;
     this.initialized = false;
   }
 }

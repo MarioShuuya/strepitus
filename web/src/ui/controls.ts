@@ -10,6 +10,7 @@ export interface ControlValues {
   dynoIntegralGain: number;
   dynoMode: number;
   dynoLoadTorque: number;
+  dynoTargetPower: number;
   throttle: number;
   volume: number;
   muted: boolean;
@@ -28,17 +29,20 @@ export function createControls(
     dynoIntegralGain: 0.5,
     dynoMode: 0,
     dynoLoadTorque: 10.0,
+    dynoTargetPower: 5.0,
     throttle: 1.0,
     volume: 0.3,
     muted: false,
     timeScale: 1.0,
   };
 
+  const pauseBtn = document.getElementById("pause-btn") as HTMLButtonElement;
   const rpmInput = document.getElementById("rpm-input") as HTMLInputElement;
   const dynoToggle = document.getElementById("dyno-toggle") as HTMLInputElement;
   const dynoGainInput = document.getElementById("dyno-gain") as HTMLInputElement;
   const dynoModeSelect = document.getElementById("dyno-mode") as HTMLSelectElement;
   const dynoLoadInput = document.getElementById("dyno-load") as HTMLInputElement;
+  const dynoPowerInput = document.getElementById("dyno-power") as HTMLInputElement;
   const sweepBtn = document.getElementById("sweep-btn") as HTMLButtonElement;
   const throttleSlider = document.getElementById("throttle-slider") as HTMLInputElement;
   const throttleValueEl = document.getElementById("throttle-value") as HTMLSpanElement;
@@ -62,6 +66,14 @@ export function createControls(
 
   function updateMuteBtn() {
     muteBtn.textContent = values.muted ? "\u{1F507}" : "\u{1F50A}";
+  }
+
+  // Pause button
+  if (pauseBtn) {
+    pauseBtn.addEventListener("click", () => {
+      values.running = !values.running;
+      onChange(values);
+    });
   }
 
   // Numeric input field
@@ -91,7 +103,9 @@ export function createControls(
   // Dyno mode selector
   function updateDynoModeUI() {
     const loadGroup = document.getElementById("dyno-load-group");
+    const powerGroup = document.getElementById("dyno-power-group");
     if (loadGroup) loadGroup.style.display = values.dynoMode === 1 ? "contents" : "none";
+    if (powerGroup) powerGroup.style.display = values.dynoMode === 3 ? "contents" : "none";
     if (sweepBtn) sweepBtn.style.display = values.dynoMode === 0 ? "inline" : "none";
   }
 
@@ -108,6 +122,16 @@ export function createControls(
       const v = parseFloat(dynoLoadInput.value);
       if (!isNaN(v) && v >= 0) {
         values.dynoLoadTorque = v;
+        onChange(values);
+      }
+    });
+  }
+
+  if (dynoPowerInput) {
+    dynoPowerInput.addEventListener("input", () => {
+      const v = parseFloat(dynoPowerInput.value);
+      if (!isNaN(v) && v >= 0) {
+        values.dynoTargetPower = v;
         onChange(values);
       }
     });

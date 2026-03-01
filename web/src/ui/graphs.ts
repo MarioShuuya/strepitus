@@ -5,13 +5,191 @@
 
 // ── Telemetry (instantaneous values overlay) ──────────────────────
 
+// Phase colors for visual identification
+const PHASE_COLORS: Record<string, string> = {
+  Intake: "#60a5fa",
+  Compression: "#4ade80",
+  Power: "#f87171",
+  Exhaust: "#f59e0b",
+};
+
+// Phase abbreviations for cylinder cards
+const PHASE_ABBREV: Record<string, string> = {
+  Intake: "INT",
+  Compression: "CMP",
+  Power: "PWR",
+  Exhaust: "EXH",
+};
+
+export interface CylinderTelemetry {
+  stroke_phase: number;
+  crank_angle: number;
+  gas_temperature: number;
+  cylinder_pressure: number;
+}
+
 export class TelemetryDisplay {
   private container: HTMLElement;
+  // Cache DOM refs for fast updates (avoid innerHTML on every frame)
+  private rpmVal!: HTMLElement;
+  private rpmBadge!: HTMLElement;
+  private powerVal!: HTMLElement;
+  private powerSub!: HTMLElement;
+  private torqueVal!: HTMLElement;
+  private throttleVal!: HTMLElement;
+  private throttleBar!: HTMLElement;
+  private phaseBoxes!: Record<string, HTMLElement>;
+  private mapVal!: HTMLElement;
+  private crankVal!: HTMLElement;
+  private gasTempVal!: HTMLElement;
+  private fpsVal!: HTMLElement;
+  private hadNaN = false;
+  private stalled = false;
+  private smoothedTorqueDisplay = 0;
+  // Throttle secondary updates to ~5 Hz so text is readable
+  private lastSecondaryUpdate = 0;
+  private static readonly SECONDARY_INTERVAL_MS = 200;
+
+  // Per-cylinder cards (multi-cylinder mode)
+  private cylCards: HTMLElement[] = [];
+  private cylCount = 0;
+  private cylCardsRow: HTMLElement | null = null;
+  private singleCylRegion: HTMLElement | null = null;
 
   constructor(containerId: string) {
     const el = document.getElementById(containerId);
     if (!el) throw new Error(`Element #${containerId} not found`);
     this.container = el;
+    this.buildKpiBar();
+  }
+
+  private buildKpiBar(): void {
+    this.container.innerHTML = `
+      <div class="kpi-card rpm">
+        <span class="kpi-label">RPM</span>
+        <span class="kpi-value" id="kpi-rpm">0</span>
+        <span class="kpi-sub"><span class="kpi-badge ok" id="kpi-badge">OK</span></span>
+      </div>
+      <div class="kpi-card power">
+        <span class="kpi-label">Power</span>
+        <span class="kpi-value" id="kpi-power">0.0</span>
+        <span class="kpi-sub" id="kpi-power-sub">0.0 HP</span>
+      </div>
+      <div class="kpi-card torque">
+        <span class="kpi-label">Torque</span>
+        <span class="kpi-value" id="kpi-torque">0.0</span>
+        <span class="kpi-sub">N·m</span>
+      </div>
+      <div class="kpi-card throttle">
+        <span class="kpi-label">Throttle</span>
+        <span class="kpi-value" id="kpi-throttle">100%</span>
+        <span class="kpi-sub"><span class="throttle-bar-bg"><span class="throttle-bar-fill" id="kpi-thr-bar" style="width:100%"></span></span></span>
+      </div>
+      <div id="single-cyl-region" style="display:contents">
+        <div class="phase-indicators">
+          <div class="phase-box" id="phase-intake" data-phase="Intake"><span class="phase-dot"></span>INT</div>
+          <div class="phase-box" id="phase-compression" data-phase="Compression"><span class="phase-dot"></span>CMP</div>
+          <div class="phase-box" id="phase-power" data-phase="Power"><span class="phase-dot"></span>PWR</div>
+          <div class="phase-box" id="phase-exhaust" data-phase="Exhaust"><span class="phase-dot"></span>EXH</div>
+        </div>
+        <div class="kpi-card-mini">
+          <span class="kpi-label">MAP</span>
+          <span class="kpi-value-sm" id="kpi-map">— <span class="kpi-unit">kPa</span></span>
+        </div>
+        <div class="kpi-card-mini">
+          <span class="kpi-label">Crank</span>
+          <span class="kpi-value-sm" id="kpi-crank">—°</span>
+        </div>
+        <div class="kpi-card-mini">
+          <span class="kpi-label">Gas Temp</span>
+          <span class="kpi-value-sm" id="kpi-gastemp">— <span class="kpi-unit">K</span></span>
+        </div>
+      </div>
+      <div id="cyl-cards-row" class="cyl-cards-row" style="display:none"></div>
+      <div class="kpi-card-mini" style="margin-left:auto">
+        <span class="kpi-label">MAP</span>
+        <span class="kpi-value-sm" id="kpi-map-shared">— <span class="kpi-unit">kPa</span></span>
+      </div>
+      <div class="kpi-card-mini">
+        <span class="kpi-label">FPS</span>
+        <span class="kpi-value-sm" id="kpi-fps">—</span>
+      </div>
+    `;
+
+    this.rpmVal = document.getElementById("kpi-rpm")!;
+    this.rpmBadge = document.getElementById("kpi-badge")!;
+    this.powerVal = document.getElementById("kpi-power")!;
+    this.powerSub = document.getElementById("kpi-power-sub")!;
+    this.torqueVal = document.getElementById("kpi-torque")!;
+    this.throttleVal = document.getElementById("kpi-throttle")!;
+    this.throttleBar = document.getElementById("kpi-thr-bar")!;
+    this.phaseBoxes = {
+      Intake: document.getElementById("phase-intake")!,
+      Compression: document.getElementById("phase-compression")!,
+      Power: document.getElementById("phase-power")!,
+      Exhaust: document.getElementById("phase-exhaust")!,
+    };
+    this.mapVal = document.getElementById("kpi-map")!;
+    this.crankVal = document.getElementById("kpi-crank")!;
+    this.gasTempVal = document.getElementById("kpi-gastemp")!;
+    this.fpsVal = document.getElementById("kpi-fps")!;
+    this.singleCylRegion = document.getElementById("single-cyl-region")!;
+    this.cylCardsRow = document.getElementById("cyl-cards-row")!;
+  }
+
+  private buildCylinderCards(count: number): void {
+    this.cylCount = count;
+    this.cylCards = [];
+    const row = this.cylCardsRow!;
+    row.innerHTML = "";
+
+    for (let i = 0; i < count; i++) {
+      const card = document.createElement("div");
+      card.className = "cyl-card";
+      card.innerHTML = `
+        <div class="cyl-header">
+          <span class="cyl-phase-dot"></span>
+          <span class="cyl-name">C${i + 1}</span>
+          <span class="cyl-phase-label">—</span>
+        </div>
+        <div class="cyl-metrics">
+          <div class="cyl-metric-row"><span class="cyl-metric-label">Crank</span><span class="cyl-metric-value cyl-crank">—°</span></div>
+          <div class="cyl-metric-row"><span class="cyl-metric-label">Temp</span><span class="cyl-metric-value cyl-temp">— K</span></div>
+          <div class="cyl-metric-row"><span class="cyl-metric-label">Press</span><span class="cyl-metric-value cyl-press">— kPa</span></div>
+        </div>
+      `;
+      row.appendChild(card);
+      this.cylCards.push(card);
+    }
+  }
+
+  private updateCylinderCards(cylinders: CylinderTelemetry[]): void {
+    const phases = ["Intake", "Compression", "Power", "Exhaust"];
+
+    for (let i = 0; i < cylinders.length && i < this.cylCards.length; i++) {
+      const cyl = cylinders[i];
+      const card = this.cylCards[i];
+      const phase = phases[cyl.stroke_phase] ?? "?";
+      const color = PHASE_COLORS[phase] ?? "#666";
+      const crankDeg = ((cyl.crank_angle * 180) / Math.PI) % 720;
+
+      const dot = card.querySelector(".cyl-phase-dot") as HTMLElement;
+      dot.style.background = color;
+      dot.style.boxShadow = `0 0 0.4rem ${color}`;
+
+      const label = card.querySelector(".cyl-phase-label") as HTMLElement;
+      label.textContent = PHASE_ABBREV[phase] ?? "?";
+      label.style.color = color;
+
+      const crank = card.querySelector(".cyl-crank") as HTMLElement;
+      crank.textContent = `${crankDeg.toFixed(0)}°`;
+
+      const temp = card.querySelector(".cyl-temp") as HTMLElement;
+      temp.textContent = `${cyl.gas_temperature.toFixed(0)} K`;
+
+      const press = card.querySelector(".cyl-press") as HTMLElement;
+      press.textContent = `${(cyl.cylinder_pressure / 1000).toFixed(0)} kPa`;
+    }
   }
 
   update(state: {
@@ -24,26 +202,89 @@ export class TelemetryDisplay {
     power_kw?: number;
     manifold_pressure?: number;
     throttle?: number;
+    fps?: number;
+    tps?: number;
+    torque?: number;
+    cylinders?: CylinderTelemetry[];
   }): void {
     const phases = ["Intake", "Compression", "Power", "Exhaust"];
-    const phase = phases[state.stroke_phase] ?? "Unknown";
+    const phase = phases[state.stroke_phase] ?? "?";
     const crankDeg = ((state.crank_angle * 180) / Math.PI) % 720;
     const kw = state.power_kw ?? 0;
     const hp = kw * 1.341;
     const mapKpa = (state.manifold_pressure ?? 101325) / 1000;
     const thr = Math.round((state.throttle ?? 1.0) * 100);
 
-    this.container.innerHTML = `
-      <div><span class="label">RPM:</span> <span class="value">${state.rpm.toFixed(0)}</span></div>
-      <div><span class="label">Crank:</span> <span class="value">${crankDeg.toFixed(1)}°</span></div>
-      <div><span class="label">Phase:</span> <span class="value">${phase}</span></div>
-      <div><span class="label">Throttle:</span> <span class="value">${thr}%</span></div>
-      <div><span class="label">MAP:</span> <span class="value">${mapKpa.toFixed(1)} kPa</span></div>
-      <div><span class="label">Pressure:</span> <span class="value">${(state.cylinder_pressure / 1000).toFixed(1)} kPa</span></div>
-      <div><span class="label">Gas Temp:</span> <span class="value">${state.gas_temperature.toFixed(0)} K</span></div>
-      <div><span class="label">Piston:</span> <span class="value">${(state.piston_position * 1000).toFixed(1)} mm</span></div>
-      <div><span class="label">Power:</span> <span class="value">${kw.toFixed(1)} kW / ${hp.toFixed(1)} HP</span></div>
-    `;
+    // Detect NaN
+    const anyNaN = !Number.isFinite(state.rpm) || !Number.isFinite(state.cylinder_pressure);
+    if (anyNaN) this.hadNaN = true;
+    this.stalled = state.rpm < 1;
+
+    // Smooth torque for display
+    const rawTorque = state.torque ?? 0;
+    this.smoothedTorqueDisplay += 0.05 * (rawTorque - this.smoothedTorqueDisplay);
+
+    // Primary KPI values — update every frame (large numbers, readable)
+    this.rpmVal.textContent = state.rpm.toFixed(0);
+    this.powerVal.textContent = kw.toFixed(1);
+    this.powerSub.textContent = `${hp.toFixed(1)} HP`;
+    this.torqueVal.textContent = this.smoothedTorqueDisplay.toFixed(1);
+    this.throttleVal.textContent = `${thr}%`;
+    this.throttleBar.style.width = `${thr}%`;
+
+    // Badge
+    if (this.hadNaN) {
+      this.rpmBadge.textContent = "NaN";
+      this.rpmBadge.className = "kpi-badge critical";
+    } else if (this.stalled) {
+      this.rpmBadge.textContent = "STALLED";
+      this.rpmBadge.className = "kpi-badge warn";
+    } else {
+      this.rpmBadge.textContent = "OK";
+      this.rpmBadge.className = "kpi-badge ok";
+      this.hadNaN = false;
+    }
+
+    // Multi-cylinder mode: show per-cylinder cards, hide single-cyl region
+    const isMulti = state.cylinders && state.cylinders.length > 1;
+    if (isMulti) {
+      if (this.singleCylRegion) this.singleCylRegion.style.display = "none";
+      if (this.cylCardsRow) this.cylCardsRow.style.display = "";
+      if (state.cylinders!.length !== this.cylCount) {
+        this.buildCylinderCards(state.cylinders!.length);
+      }
+    } else {
+      if (this.singleCylRegion) this.singleCylRegion.style.display = "contents";
+      if (this.cylCardsRow) this.cylCardsRow.style.display = "none";
+
+      // Phase indicators — update every frame (visual, not flickery numbers)
+      for (const [name, el] of Object.entries(this.phaseBoxes)) {
+        if (name === phase) {
+          el.classList.add("active");
+        } else {
+          el.classList.remove("active");
+        }
+      }
+    }
+
+    // Secondary numeric metrics — throttled to avoid unreadable flickering
+    const now = performance.now();
+    if (now - this.lastSecondaryUpdate < TelemetryDisplay.SECONDARY_INTERVAL_MS) return;
+    this.lastSecondaryUpdate = now;
+
+    if (isMulti) {
+      this.updateCylinderCards(state.cylinders!);
+    } else {
+      this.mapVal.innerHTML = `${mapKpa.toFixed(1)} <span class="kpi-unit">kPa</span>`;
+      this.crankVal.textContent = `${crankDeg.toFixed(0)}°`;
+      this.gasTempVal.innerHTML = `${state.gas_temperature.toFixed(0)} <span class="kpi-unit">K</span>`;
+    }
+
+    // Shared MAP value (shown in both modes)
+    const mapShared = document.getElementById("kpi-map-shared");
+    if (mapShared) mapShared.innerHTML = `${mapKpa.toFixed(1)} <span class="kpi-unit">kPa</span>`;
+
+    this.fpsVal.textContent = `${state.fps ?? 0} / ${state.tps ?? 0}`;
   }
 }
 
@@ -249,14 +490,13 @@ const CHANNELS: ChartChannel[] = [
 
 // ── HistoryCharts ─────────────────────────────────────────────────
 
-const CHART_HEIGHT = 64;
-const CHART_PAD_TOP = 13;
-const CHART_PAD_BOTTOM = 13;
+const CHART_HEIGHT = 80;
+const CHART_PAD_TOP = 15;
+const CHART_PAD_BOTTOM = 15;
 const RANGE_UPDATE_MS = 5000; // update Y-axis range every 5 seconds
 
 export class HistoryCharts {
   private panel: HTMLElement;
-  private healthEl: HTMLDivElement;
   private buffers: Map<string, RingBuffer> = new Map();
   private canvases: Map<string, HTMLCanvasElement> = new Map();
   private valueEls: Map<string, HTMLSpanElement> = new Map();
@@ -264,19 +504,12 @@ export class HistoryCharts {
   private lockedRanges: Map<string, [number, number]> = new Map();
   private lastRangeUpdate = 0;
   private visible = true;
-  private hadNaN = false;
-  private stalled = false;
+  private frameCounter = 0;
 
   constructor(panelId: string) {
     const el = document.getElementById(panelId);
     if (!el) throw new Error(`Element #${panelId} not found`);
     this.panel = el;
-
-    // Health indicator
-    this.healthEl = document.createElement("div");
-    this.healthEl.className = "health-indicator ok";
-    this.healthEl.textContent = "● Engine OK";
-    this.panel.appendChild(this.healthEl);
 
     // Create chart rows
     for (const ch of CHANNELS) {
@@ -355,29 +588,10 @@ export class HistoryCharts {
   }
 
   update(state: ChartState): void {
-    // Detect NaN before guards may have cleared them
-    let anyNaN = false;
     for (const ch of CHANNELS) {
       const raw = state[ch.key];
-      if (!Number.isFinite(raw)) anyNaN = true;
       const transformed = ch.displayTransform ? ch.displayTransform(raw) : raw;
       this.buffers.get(ch.key)!.push(transformed);
-    }
-
-    if (anyNaN) this.hadNaN = true;
-    this.stalled = state.rpm < 1;
-
-    // Update health
-    if (this.hadNaN) {
-      this.healthEl.className = "health-indicator critical";
-      this.healthEl.textContent = "● NaN DETECTED";
-    } else if (this.stalled) {
-      this.healthEl.className = "health-indicator warn";
-      this.healthEl.textContent = "● ENGINE STALLED";
-    } else {
-      this.healthEl.className = "health-indicator ok";
-      this.healthEl.textContent = "● Engine OK";
-      this.hadNaN = false; // clear once running clean
     }
 
     // Periodically refresh locked Y-axis ranges
@@ -388,6 +602,10 @@ export class HistoryCharts {
     }
 
     if (!this.visible) return;
+
+    // Render strip charts every 3rd frame (20fps is sufficient for scrolling traces)
+    this.frameCounter++;
+    if (this.frameCounter % 3 !== 0) return;
 
     // Render each chart
     for (const ch of CHANNELS) {

@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Strepitus — Engine Simulation</title>
     <style>
+      :root { font-size: 13px; }
+
       * {
         margin: 0;
         padding: 0;
@@ -15,6 +17,7 @@
         background: #0a0a0a;
         color: #e0e0e0;
         font-family: "JetBrains Mono", "Fira Code", monospace;
+        font-size: 1rem;
         overflow: hidden;
       }
 
@@ -31,28 +34,287 @@
         min-height: 0;
       }
 
-      #status {
-        padding: 12px 16px;
-        font-size: 13px;
-        color: #666;
+      /* ── KPI Status Bar ── */
+      #kpi-bar {
+        display: flex;
+        align-items: stretch;
+        gap: 0.15rem;
+        padding: 0.4rem 0.9rem;
+        background: #0d0d0d;
         border-bottom: 1px solid #1a1a1a;
+        flex-shrink: 0;
+        flex-wrap: wrap;
       }
 
-      #status.ready {
+      .kpi-card {
+        flex: 1 1 6rem;
+        min-width: 6rem;
+        max-width: 12rem;
+        padding: 0.35rem 0.8rem;
+        background: #111;
+        border-radius: 0.4rem;
+        border: 1px solid #1a1a1a;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+
+      .kpi-card .kpi-label {
+        font-size: 0.7rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        opacity: 0.7;
+      }
+
+      .kpi-card .kpi-value {
+        font-size: 1.6rem;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        line-height: 1.2;
+      }
+
+      .kpi-card .kpi-sub {
+        font-size: 0.7rem;
+        color: #888;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .kpi-card.rpm { border-top: 2px solid #4ade80; }
+      .kpi-card.rpm .kpi-label { color: #4ade80; }
+      .kpi-card.rpm .kpi-value { color: #4ade80; }
+
+      .kpi-card.power { border-top: 2px solid #c084fc; }
+      .kpi-card.power .kpi-label { color: #c084fc; }
+      .kpi-card.power .kpi-value { color: #c084fc; }
+
+      .kpi-card.torque { border-top: 2px solid #a78bfa; }
+      .kpi-card.torque .kpi-label { color: #a78bfa; }
+      .kpi-card.torque .kpi-value { color: #a78bfa; }
+
+      .kpi-card.throttle { border-top: 2px solid #f59e0b; }
+      .kpi-card.throttle .kpi-label { color: #f59e0b; }
+      .kpi-card.throttle .kpi-value { color: #f59e0b; }
+
+      .kpi-card-mini {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        border-radius: 0.3rem;
+        padding: 0.25rem 0.5rem;
+        min-width: 4.5rem;
+        font-variant-numeric: tabular-nums;
+      }
+      .kpi-card-mini .kpi-label {
+        font-size: 0.65rem;
+        color: #888;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .kpi-value-sm {
+        font-size: 0.85rem;
+        color: #ccc;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .kpi-unit {
+        font-size: 0.65rem;
+        color: #666;
+        font-weight: 400;
+      }
+      .phase-indicators {
+        display: flex;
+        align-items: stretch;
+        gap: 0.15rem;
+        margin-left: 0.3rem;
+      }
+      .phase-box {
+        display: flex;
+        align-items: center;
+        gap: 0.3rem;
+        padding: 0.2rem 0.5rem;
+        border-radius: 0.25rem;
+        border: 1px solid #2a2a2a;
+        background: #111;
+        font-size: 0.7rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        color: #444;
+        transition: background 0.12s, color 0.12s, border-color 0.12s, box-shadow 0.12s;
+      }
+      .phase-dot {
+        display: inline-block;
+        width: 0.4rem;
+        height: 0.4rem;
+        border-radius: 50%;
+        background: #333;
+        transition: background 0.12s, box-shadow 0.12s;
+      }
+      /* Intake — blue */
+      #phase-intake.active {
+        color: #60a5fa;
+        border-color: #60a5fa;
+        background: rgba(96, 165, 250, 0.1);
+        box-shadow: 0 0 0.5rem rgba(96, 165, 250, 0.2);
+      }
+      #phase-intake.active .phase-dot {
+        background: #60a5fa;
+        box-shadow: 0 0 0.4rem #60a5fa;
+      }
+      /* Compression — green */
+      #phase-compression.active {
         color: #4ade80;
+        border-color: #4ade80;
+        background: rgba(74, 222, 128, 0.1);
+        box-shadow: 0 0 0.5rem rgba(74, 222, 128, 0.2);
       }
-
-      #status.error {
+      #phase-compression.active .phase-dot {
+        background: #4ade80;
+        box-shadow: 0 0 0.4rem #4ade80;
+      }
+      /* Power — red */
+      #phase-power.active {
         color: #f87171;
+        border-color: #f87171;
+        background: rgba(248, 113, 113, 0.1);
+        box-shadow: 0 0 0.5rem rgba(248, 113, 113, 0.2);
+      }
+      #phase-power.active .phase-dot {
+        background: #f87171;
+        box-shadow: 0 0 0.4rem #f87171;
+      }
+      /* Exhaust — amber */
+      #phase-exhaust.active {
+        color: #f59e0b;
+        border-color: #f59e0b;
+        background: rgba(245, 158, 11, 0.1);
+        box-shadow: 0 0 0.5rem rgba(245, 158, 11, 0.2);
+      }
+      #phase-exhaust.active .phase-dot {
+        background: #f59e0b;
+        box-shadow: 0 0 0.4rem #f59e0b;
       }
 
-      /* ── Parameter Panel (Phase 7) — overlays engine canvas ── */
+      .kpi-badge {
+        display: inline-block;
+        padding: 0.05rem 0.4rem;
+        border-radius: 0.2rem;
+        font-size: 0.65rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+      }
+
+      .kpi-badge.ok { background: rgba(74,222,128,0.15); color: #4ade80; }
+      .kpi-badge.warn { background: rgba(250,204,21,0.15); color: #facc15; }
+      .kpi-badge.critical { background: rgba(248,113,113,0.15); color: #f87171; }
+
+      .throttle-bar-bg {
+        width: 4.5rem;
+        height: 0.4rem;
+        background: #222;
+        border-radius: 0.2rem;
+        overflow: hidden;
+        display: inline-block;
+        vertical-align: middle;
+        margin-left: 0.3rem;
+      }
+
+      .throttle-bar-fill {
+        height: 100%;
+        background: #f59e0b;
+        border-radius: 0.2rem;
+        transition: width 0.1s;
+      }
+
+      /* ── Per-Cylinder Cards (multi-cylinder KPI) ── */
+      .cyl-cards-row {
+        display: flex;
+        align-items: stretch;
+        gap: 0.2rem;
+        flex-wrap: wrap;
+      }
+
+      .cyl-card {
+        background: #111;
+        border: 1px solid #2a2a2a;
+        border-radius: 0.4rem;
+        padding: 0.35rem 0.6rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+        width: 8.5rem;
+        flex-shrink: 0;
+        flex-grow: 0;
+      }
+
+      .cyl-header {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        border-bottom: 1px solid #222;
+        padding-bottom: 0.2rem;
+      }
+
+      .cyl-phase-dot {
+        display: inline-block;
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 50%;
+        background: #333;
+        flex-shrink: 0;
+        transition: background 0.12s, box-shadow 0.12s;
+      }
+
+      .cyl-name {
+        font-size: 0.85rem;
+        font-weight: 700;
+        color: #ccc;
+        letter-spacing: 0.04em;
+      }
+
+      .cyl-phase-label {
+        font-size: 0.8rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        color: #666;
+        margin-left: auto;
+        transition: color 0.12s;
+      }
+
+      .cyl-metrics {
+        display: flex;
+        flex-direction: column;
+        gap: 0.05rem;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      .cyl-metric-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+      }
+
+      .cyl-metric-label {
+        font-size: 0.7rem;
+        color: #666;
+      }
+
+      .cyl-metric-value {
+        font-size: 0.85rem;
+        color: #ccc;
+        font-weight: 600;
+      }
+
+      /* ── Parameter Panel — overlays engine canvas ── */
       #param-panel {
         position: absolute;
         top: 0;
         left: 0;
         bottom: 0;
-        width: 300px;
+        width: min(22rem, 45%);
         z-index: 10;
         background: rgba(13, 13, 13, 0.95);
         border-right: 1px solid #1a1a1a;
@@ -60,7 +322,7 @@
         flex-direction: column;
         overflow-y: auto;
         overflow-x: hidden;
-        font-size: 11px;
+        font-size: 1rem;
       }
 
       #param-panel.hidden {
@@ -68,8 +330,8 @@
       }
 
       #param-panel .panel-header {
-        padding: 10px 12px;
-        font-size: 12px;
+        padding: 0.7rem 1rem;
+        font-size: 1rem;
         font-weight: 600;
         color: #4ade80;
         border-bottom: 1px solid #1a1a1a;
@@ -79,10 +341,10 @@
       }
 
       #param-panel .preset-row {
-        padding: 8px 12px;
+        padding: 0.5rem 1rem;
         border-bottom: 1px solid #1a1a1a;
         display: flex;
-        gap: 6px;
+        gap: 0.4rem;
         align-items: center;
         flex-wrap: wrap;
       }
@@ -91,21 +353,21 @@
         flex: 1;
         background: #1a1a1a;
         border: 1px solid #333;
-        border-radius: 4px;
+        border-radius: 0.3rem;
         color: #fff;
         font-family: inherit;
-        font-size: 11px;
-        padding: 4px 6px;
+        font-size: 0.9rem;
+        padding: 0.3rem 0.5rem;
       }
 
       #param-panel .preset-row button {
         background: #1a1a1a;
         border: 1px solid #333;
-        border-radius: 4px;
+        border-radius: 0.3rem;
         color: #ccc;
         font-family: inherit;
-        font-size: 10px;
-        padding: 4px 8px;
+        font-size: 0.85rem;
+        padding: 0.3rem 0.7rem;
         cursor: pointer;
       }
 
@@ -120,26 +382,57 @@
       }
 
       #param-panel .group-title {
-        padding: 6px 12px;
-        font-size: 10px;
+        padding: 0.5rem 1rem;
+        font-size: 0.85rem;
         font-weight: 600;
-        color: #666;
+        color: #888;
         text-transform: uppercase;
-        letter-spacing: 0.5px;
+        letter-spacing: 0.04em;
         background: #111;
+        cursor: pointer;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        user-select: none;
+        transition: color 0.15s;
+      }
+
+      #param-panel .group-title:hover {
+        color: #ccc;
+      }
+
+      #param-panel .group-title .chevron {
+        font-size: 0.75rem;
+        color: #555;
+        transition: transform 0.2s;
+      }
+
+      #param-panel .group-title.expanded .chevron {
+        transform: rotate(90deg);
+      }
+
+      #param-panel .group-content {
+        overflow: hidden;
+        max-height: 0;
+        transition: max-height 0.25s ease-out;
+      }
+
+      #param-panel .group-content.expanded {
+        max-height: 40rem;
+        transition: max-height 0.35s ease-in;
       }
 
       #param-panel .param-row {
-        padding: 3px 12px;
+        padding: 0.25rem 1rem;
         display: flex;
         align-items: center;
-        gap: 6px;
+        gap: 0.5rem;
       }
 
       #param-panel .param-row label {
         flex: 1;
-        color: #888;
-        font-size: 10px;
+        color: #999;
+        font-size: 0.9rem;
         min-width: 0;
         white-space: nowrap;
         overflow: hidden;
@@ -147,15 +440,15 @@
       }
 
       #param-panel .param-row input[type="range"] {
-        width: 80px;
+        flex: 0 0 40%;
         accent-color: #4ade80;
       }
 
       #param-panel .param-row .param-value {
-        width: 56px;
+        flex: 0 0 4.5rem;
         text-align: right;
         color: #fff;
-        font-size: 10px;
+        font-size: 0.9rem;
         font-variant-numeric: tabular-nums;
       }
 
@@ -164,13 +457,13 @@
         flex: 1;
         position: relative;
         min-width: 0;
+        overflow: hidden;
       }
 
       #charts-panel {
-        width: 40%;
-        min-width: 240px;
-        max-width: 560px;
-        flex-shrink: 1;
+        flex: 0 1 35%;
+        min-width: 15rem;
+        max-width: 40rem;
         background: #0a0a0a;
         border-left: 1px solid #1a1a1a;
         display: flex;
@@ -183,30 +476,9 @@
         display: none;
       }
 
-      #charts-panel .health-indicator {
-        padding: 8px 12px;
-        font-size: 11px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        border-bottom: 1px solid #1a1a1a;
-      }
-
-      #charts-panel .health-indicator.ok {
-        color: #4ade80;
-      }
-
-      #charts-panel .health-indicator.warn {
-        color: #facc15;
-      }
-
-      #charts-panel .health-indicator.critical {
-        color: #f87171;
-      }
-
       .chart-row {
         border-bottom: 1px solid #1a1a1a;
-        padding: 2px 0;
+        padding: 0.2rem 0;
       }
 
       .chart-area {
@@ -216,14 +488,14 @@
       .chart-header {
         display: flex;
         justify-content: space-between;
-        padding: 3px 10px 1px;
-        font-size: 12px;
+        padding: 0.25rem 0.9rem 0.1rem;
+        font-size: 1rem;
       }
 
       .chart-header .chart-label-group {
         display: flex;
         align-items: center;
-        gap: 4px;
+        gap: 0.35rem;
       }
 
       .chart-header .chart-label {
@@ -234,12 +506,12 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        width: 13px;
-        height: 13px;
+        width: 1.1rem;
+        height: 1.1rem;
         border-radius: 50%;
         background: #222;
         color: #666;
-        font-size: 8px;
+        font-size: 0.65rem;
         cursor: pointer;
         flex-shrink: 0;
         border: 1px solid #333;
@@ -252,74 +524,85 @@
       }
 
       .chart-tooltip {
-        padding: 3px 10px 4px;
-        font-size: 9px;
+        padding: 0.3rem 0.9rem 0.4rem;
+        font-size: 0.75rem;
         color: #999;
-        line-height: 1.4;
+        line-height: 1.5;
         background: #111;
       }
 
       .chart-header .chart-value {
         color: #fff;
+        font-size: 1rem;
         font-variant-numeric: tabular-nums;
       }
 
       #engine-canvas {
+        display: block;
         width: 100%;
         height: 100%;
       }
 
-      #telemetry {
-        position: absolute;
-        top: 12px;
-        right: 12px;
-        background: rgba(0, 0, 0, 0.8);
-        border: 1px solid #333;
-        border-radius: 6px;
-        padding: 12px 16px;
-        font-size: 12px;
-        line-height: 1.8;
-        min-width: 240px;
-      }
-
-      #telemetry .label {
-        color: #888;
-      }
-
-      #telemetry .value {
-        color: #fff;
-        font-variant-numeric: tabular-nums;
-      }
-
+      /* ── Controls Dock Bar (bottom) ── */
       #controls {
-        position: absolute;
-        bottom: 12px;
-        left: 12px;
-        background: rgba(0, 0, 0, 0.8);
-        border: 1px solid #333;
-        border-radius: 6px;
-        padding: 12px 16px;
-        font-size: 12px;
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 0.7rem;
+        padding: 0.5rem 1.2rem;
+        background: #141414;
+        border-top: 1px solid #2a2a2a;
+        font-size: 1rem;
+        flex-shrink: 0;
         flex-wrap: wrap;
       }
 
+      #controls .ctrl-section {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-shrink: 0;
+      }
+
+      #controls .ctrl-divider {
+        width: 1px;
+        height: 1.8rem;
+        background: #333;
+        flex-shrink: 0;
+      }
+
       #controls label {
-        color: #888;
+        color: #aaa;
+        font-size: 0.9rem;
+      }
+
+      #controls button {
+        background: #222;
+        border: 1px solid #444;
+        border-radius: 0.3rem;
+        color: #ddd;
+        font-family: inherit;
+        font-size: 0.9rem;
+        padding: 0.3rem 0.8rem;
+        cursor: pointer;
+        transition: border-color 0.15s, color 0.15s;
+      }
+
+      #controls button:hover {
+        background: #2a2a2a;
+        border-color: #4ade80;
+        color: #fff;
       }
 
       #rpm-input,
       #dyno-gain {
-        width: 70px;
+        width: 5rem;
         background: #1a1a1a;
         border: 1px solid #444;
-        border-radius: 4px;
+        border-radius: 0.3rem;
         color: #fff;
         font-family: inherit;
-        font-size: 13px;
-        padding: 4px 8px;
+        font-size: 1rem;
+        padding: 0.25rem 0.5rem;
         text-align: right;
       }
 
@@ -333,33 +616,37 @@
         accent-color: #4ade80;
       }
 
+      #throttle-slider {
+        width: 8rem !important;
+      }
+
       #volume-slider {
-        width: 60px;
+        width: 4rem;
         accent-color: #60a5fa;
       }
 
       #time-scale {
-        width: 60px;
+        width: 4rem;
         accent-color: #c084fc;
       }
 
       #time-scale-value {
         color: #c084fc;
         font-variant-numeric: tabular-nums;
-        min-width: 30px;
+        min-width: 2.3rem;
       }
 
       /* ── Audio Mixer Panel ── */
       #audio-mixer {
         position: absolute;
-        bottom: 60px;
-        right: 12px;
+        bottom: 4.5rem;
+        right: 0.9rem;
         z-index: 10;
-        width: 250px;
+        width: 19rem;
         background: rgba(13, 13, 13, 0.95);
         border: 1px solid #1a1a1a;
-        border-radius: 6px;
-        font-size: 11px;
+        border-radius: 0.4rem;
+        font-size: 0.85rem;
       }
 
       #audio-mixer.hidden {
@@ -370,14 +657,14 @@
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 8px 10px;
+        padding: 0.5rem 0.7rem;
         border-bottom: 1px solid #1a1a1a;
       }
 
       #audio-mixer .mixer-title {
         color: #60a5fa;
         font-weight: 600;
-        font-size: 12px;
+        font-size: 0.9rem;
       }
 
       #audio-mixer .mixer-close {
@@ -385,8 +672,8 @@
         border: none;
         color: #666;
         cursor: pointer;
-        font-size: 14px;
-        padding: 0 2px;
+        font-size: 1rem;
+        padding: 0 0.15rem;
       }
 
       #audio-mixer .mixer-close:hover {
@@ -396,8 +683,8 @@
       #audio-mixer .mixer-master {
         display: flex;
         align-items: center;
-        gap: 6px;
-        padding: 6px 10px;
+        gap: 0.4rem;
+        padding: 0.4rem 0.7rem;
         border-bottom: 1px solid #1a1a1a;
       }
 
@@ -405,13 +692,13 @@
         background: none;
         border: none;
         cursor: pointer;
-        font-size: 14px;
+        font-size: 1rem;
         padding: 0;
       }
 
       #audio-mixer .mixer-master label {
         color: #888;
-        font-size: 10px;
+        font-size: 0.75rem;
       }
 
       #audio-mixer .mixer-master-vol {
@@ -420,26 +707,26 @@
       }
 
       #audio-mixer .mixer-channels {
-        padding: 4px 0;
+        padding: 0.3rem 0;
       }
 
       #audio-mixer .mixer-channel-row {
         display: flex;
         align-items: center;
-        gap: 6px;
-        padding: 3px 10px;
+        gap: 0.4rem;
+        padding: 0.2rem 0.7rem;
       }
 
       #audio-mixer .mixer-channel-row input[type="checkbox"] {
         accent-color: #4ade80;
-        width: 13px;
-        height: 13px;
+        width: 1rem;
+        height: 1rem;
         flex-shrink: 0;
       }
 
       #audio-mixer .mixer-channel-label {
-        width: 80px;
-        font-size: 10px;
+        width: 6rem;
+        font-size: 0.75rem;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -451,8 +738,291 @@
       }
 
       #controls .hint {
-        color: #555;
-        font-size: 11px;
+        color: #666;
+        font-size: 0.8rem;
+      }
+
+      /* ── Dyno Help Panel ── */
+      #dyno-help {
+        border-top: 1px solid #222;
+        background: #0d0d0d;
+      }
+
+      .dyno-help-content {
+        padding: 0.8rem 1rem;
+        max-width: 56rem;
+      }
+
+      .dyno-help-title {
+        font-size: 0.95rem;
+        color: #ccc;
+        margin-bottom: 0.4rem;
+        font-weight: 600;
+      }
+
+      .dyno-help-intro {
+        font-size: 0.8rem;
+        color: #888;
+        line-height: 1.55;
+        margin: 0 0 0.6rem;
+      }
+
+      .dyno-help-modes {
+        display: flex;
+        gap: 0.8rem;
+        flex-wrap: wrap;
+      }
+
+      .dyno-help-mode {
+        flex: 1;
+        min-width: 14rem;
+        background: #141414;
+        border: 1px solid #222;
+        border-radius: 0.35rem;
+        padding: 0.6rem 0.75rem;
+      }
+
+      .dyno-help-mode-name {
+        font-size: 0.85rem;
+        font-weight: 600;
+        margin-bottom: 0.3rem;
+      }
+
+      .dyno-help-mode-desc {
+        font-size: 0.75rem;
+        color: #999;
+        line-height: 1.55;
+      }
+
+      .dyno-help-mode-desc strong {
+        color: #ccc;
+      }
+
+      .dyno-help-mode-desc em {
+        color: #bbb;
+      }
+
+      .dyno-help-footer {
+        margin-top: 0.5rem;
+        font-size: 0.75rem;
+        color: #666;
+      }
+
+      .dyno-help-footer strong {
+        color: #999;
+      }
+
+      /* ── Exhaust Panel ── */
+      #exhaust-panel {
+        position: absolute;
+        bottom: 4.5rem;
+        right: 20.5rem;
+        z-index: 10;
+        width: 20rem;
+        background: #111;
+        border: 1px solid #1a1a1a;
+        border-radius: 0.4rem;
+        font-size: 0.85rem;
+        max-height: 70vh;
+        overflow-y: auto;
+      }
+
+      #exhaust-panel.hidden {
+        display: none;
+      }
+
+      #exhaust-panel .exhaust-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.5rem 0.7rem;
+        border-bottom: 1px solid #1a1a1a;
+      }
+
+      #exhaust-panel .exhaust-title {
+        color: #f97316;
+        font-weight: 600;
+        font-size: 0.9rem;
+      }
+
+      #exhaust-panel .exhaust-close {
+        background: none;
+        border: none;
+        color: #666;
+        cursor: pointer;
+        font-size: 1rem;
+        padding: 0 0.15rem;
+      }
+
+      #exhaust-panel .exhaust-close:hover {
+        color: #fff;
+      }
+
+      #exhaust-panel .exhaust-preset-row {
+        padding: 0.4rem 0.7rem;
+        border-bottom: 1px solid #1a1a1a;
+      }
+
+      #exhaust-panel .exhaust-preset-select {
+        width: 100%;
+        background: #1a1a1a;
+        border: 1px solid #444;
+        border-radius: 0.3rem;
+        color: #fff;
+        font-family: inherit;
+        font-size: 0.85rem;
+        padding: 0.25rem 0.4rem;
+      }
+
+      #exhaust-panel .exhaust-section {
+        border-bottom: 1px solid #1a1a1a;
+      }
+
+      #exhaust-panel .exhaust-section-title {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.35rem 0.7rem;
+        color: #f97316;
+        font-size: 0.75rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+
+      #exhaust-panel .exhaust-section-title input[type="checkbox"] {
+        accent-color: #f97316;
+        width: 1rem;
+        height: 1rem;
+      }
+
+      #exhaust-panel .exhaust-section-controls {
+        padding: 0 0.7rem 0.4rem;
+      }
+
+      #exhaust-panel .exhaust-param-row {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.15rem 0;
+      }
+
+      #exhaust-panel .exhaust-param-row label {
+        flex: 1;
+        color: #888;
+        font-size: 0.75rem;
+        white-space: nowrap;
+      }
+
+      #exhaust-panel .exhaust-param-row input[type="range"] {
+        flex: 0 0 40%;
+        accent-color: #f97316;
+      }
+
+      #exhaust-panel .exhaust-param-value {
+        color: #ccc;
+        font-size: 0.75rem;
+        font-variant-numeric: tabular-nums;
+        min-width: 3.2rem;
+        text-align: right;
+      }
+
+      #exhaust-panel .exhaust-param-row select {
+        background: #1a1a1a;
+        border: 1px solid #444;
+        border-radius: 0.3rem;
+        color: #fff;
+        font-family: inherit;
+        font-size: 0.75rem;
+        padding: 0.15rem 0.3rem;
+      }
+
+      /* ── Legend Panel ── */
+      #legend-panel {
+        position: absolute;
+        left: 0;
+        top: 3rem;
+        width: 13rem;
+        z-index: 8;
+        background: rgba(13, 13, 13, 0.92);
+        border: 1px solid #1a1a1a;
+        border-radius: 0 0.4rem 0.4rem 0;
+        font-size: 0.85rem;
+        max-height: calc(100% - 7rem);
+        overflow-y: auto;
+      }
+
+      #legend-panel.hidden {
+        display: none;
+      }
+
+      #legend-panel .legend-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.5rem 0.7rem;
+        border-bottom: 1px solid #1a1a1a;
+        color: #4ade80;
+        font-weight: 600;
+        font-size: 0.9rem;
+      }
+
+      #legend-panel .legend-close {
+        background: none;
+        border: none;
+        color: #666;
+        cursor: pointer;
+        font-size: 1rem;
+        padding: 0 0.15rem;
+      }
+
+      #legend-panel .legend-close:hover {
+        color: #fff;
+      }
+
+      #legend-panel .legend-group-title {
+        padding: 0.25rem 0.7rem 0.1rem;
+        font-size: 0.65rem;
+        font-weight: 600;
+        color: #666;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        background: #111;
+      }
+
+      #legend-panel .legend-entry {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.2rem 0.7rem;
+        cursor: pointer;
+        transition: background 0.1s;
+      }
+
+      #legend-panel .legend-entry:hover,
+      #legend-panel .legend-entry.legend-highlight {
+        background: rgba(74, 222, 128, 0.1);
+      }
+
+      #legend-panel .legend-entry.legend-dim {
+        opacity: 0.3;
+      }
+
+      #legend-panel .legend-swatch {
+        display: inline-block;
+        width: 0.9rem;
+        height: 0.9rem;
+        border-radius: 0.15rem;
+        flex-shrink: 0;
+        border: 1px solid rgba(255,255,255,0.1);
+      }
+
+      #legend-panel .legend-label {
+        color: #ccc;
+        font-size: 0.75rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       /* ── P-V Diagram (inside charts panel) ── */
@@ -464,25 +1034,29 @@
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 6px 10px 2px;
-        font-size: 12px;
+        padding: 0.5rem 0.9rem 0.2rem;
+        font-size: 1rem;
+        font-weight: 600;
+        color: #e0e0e0;
+        background: #111;
+        border-bottom: 1px solid #1a1a1a;
       }
 
       #pv-section .pv-header .chart-label-group {
         display: flex;
         align-items: center;
-        gap: 4px;
+        gap: 0.35rem;
       }
 
       #pv-section .pv-header .chart-label {
-        color: #888;
+        color: #ccc;
       }
 
       #pv-section .pv-tooltip {
-        padding: 4px 10px 6px;
-        font-size: 9px;
+        padding: 0.35rem 0.9rem 0.5rem;
+        font-size: 0.75rem;
         color: #999;
-        line-height: 1.4;
+        line-height: 1.5;
         background: #111;
       }
 
@@ -493,40 +1067,14 @@
   </head>
   <body>
     <div id="app">
-      <div id="status">Loading WASM module...</div>
+      <div id="kpi-bar"></div>
       <div id="main-content">
         <div id="canvas-container">
           <div id="param-panel" class="hidden"></div>
+          <div id="legend-panel" class="hidden"></div>
           <div id="audio-mixer" class="hidden"></div>
+          <div id="exhaust-panel" class="hidden"></div>
           <canvas id="engine-canvas"></canvas>
-          <div id="telemetry"></div>
-          <div id="controls">
-            <label for="rpm-input">Target RPM</label>
-            <input id="rpm-input" type="number" min="0" max="8000" step="10" value="800" />
-            <label>Throttle</label>
-            <input id="throttle-slider" type="range" min="0" max="100" value="100" style="width:70px;accent-color:#f59e0b" />
-            <span id="throttle-value" style="color:#f59e0b;font-variant-numeric:tabular-nums;min-width:30px">100%</span>
-            <label><input type="checkbox" id="dyno-toggle" checked /> Dyno</label>
-            <label for="dyno-gain">K</label>
-            <input id="dyno-gain" type="number" min="0.1" max="10" step="0.1" value="1.0" />
-            <select id="dyno-mode" style="background:#1a1a1a;border:1px solid #444;border-radius:4px;color:#fff;font-family:inherit;font-size:11px;padding:4px 6px">
-              <option value="0">Speed</option>
-              <option value="1">Load</option>
-            </select>
-            <span id="dyno-load-group" style="display:none">
-              <label for="dyno-load">Load</label>
-              <input id="dyno-load" type="number" min="0" max="100" step="1" value="10" style="width:50px;background:#1a1a1a;border:1px solid #444;border-radius:4px;color:#fff;font-family:inherit;font-size:13px;padding:4px 6px;text-align:right" />
-              <span style="color:#888;font-size:11px">N·m</span>
-            </span>
-            <button id="sweep-btn" style="background:#1a1a1a;border:1px solid #444;border-radius:4px;color:#c084fc;font-family:inherit;font-size:11px;padding:4px 8px;cursor:pointer">Sweep</button>
-            <label>Vol</label>
-            <input id="volume-slider" type="range" min="0" max="100" value="30" />
-            <button id="mute-btn" title="Mute (M)">🔊</button>
-            <label>Speed</label>
-            <input id="time-scale" type="range" min="0.1" max="2" step="0.1" value="1.0" />
-            <span id="time-scale-value">1.0x</span>
-            <span class="hint">Space W/S:throttle D G F V P A M [ ]</span>
-          </div>
         </div>
         <div id="charts-panel">
           <div id="pv-section">
@@ -543,11 +1091,107 @@
               Red = Power (combustion expands gas, doing work), Orange = Exhaust (spent gas expelled).
               A taller, wider loop means more work per cycle.
             </div>
-            <canvas id="pv-canvas" width="560" height="320"></canvas>
+            <canvas id="pv-canvas" width="560" height="360"></canvas>
           </div>
           <div id="dyno-chart-section" style="display:none;border-bottom:1px solid #1a1a1a">
-            <div style="padding:6px 10px 2px;font-size:12px;color:#888">Dyno Curve</div>
+            <div style="padding:0.5rem 0.9rem 0.2rem;font-size:1rem;color:#888">Dyno Curve</div>
             <canvas id="dyno-chart-canvas" width="560" height="280"></canvas>
+          </div>
+        </div>
+      </div>
+      <div id="controls">
+        <div class="ctrl-section">
+          <button id="pause-btn" title="Pause/Resume (Space)">&#9654;</button>
+          <button id="start-btn" style="color:#4ade80" title="Start engine (E)">Start</button>
+          <label for="rpm-input">RPM</label>
+          <input id="rpm-input" type="number" min="0" max="8000" step="10" value="800" />
+        </div>
+        <div class="ctrl-divider"></div>
+        <div class="ctrl-section">
+          <label>Throttle</label>
+          <input id="throttle-slider" type="range" min="0" max="100" value="100" style="accent-color:#f59e0b" />
+          <span id="throttle-value" style="color:#f59e0b;font-variant-numeric:tabular-nums;min-width:30px">100%</span>
+        </div>
+        <div class="ctrl-divider"></div>
+        <div class="ctrl-section">
+          <label><input type="checkbox" id="dyno-toggle" checked /> Dyno</label>
+          <span class="chart-info-btn" id="dyno-info-btn" title="Dyno mode help">?</span>
+          <label for="dyno-gain">K</label>
+          <input id="dyno-gain" type="number" min="0.1" max="10" step="0.1" value="1.0" />
+          <select id="dyno-mode" style="background:#1a1a1a;border:1px solid #444;border-radius:0.3rem;color:#fff;font-family:inherit;font-size:0.9rem;padding:0.25rem 0.4rem">
+            <option value="0">Speed</option>
+            <option value="1">Load</option>
+            <option value="3">Power</option>
+          </select>
+          <span id="dyno-load-group" style="display:none">
+            <label for="dyno-load">Load</label>
+            <input id="dyno-load" type="number" min="0" max="100" step="1" value="10" style="width:3.8rem;background:#1a1a1a;border:1px solid #444;border-radius:0.3rem;color:#fff;font-family:inherit;font-size:1rem;padding:0.25rem 0.4rem;text-align:right" />
+            <span style="color:#888;font-size:0.85rem">N·m</span>
+          </span>
+          <span id="dyno-power-group" style="display:none">
+            <label for="dyno-power">Power</label>
+            <input id="dyno-power" type="number" min="0" max="200" step="0.5" value="5" style="width:3.8rem;background:#1a1a1a;border:1px solid #444;border-radius:0.3rem;color:#fff;font-family:inherit;font-size:1rem;padding:0.25rem 0.4rem;text-align:right" />
+            <span style="color:#888;font-size:0.85rem">kW</span>
+          </span>
+          <button id="sweep-btn" style="color:#c084fc">Sweep</button>
+        </div>
+        <div class="ctrl-divider"></div>
+        <div class="ctrl-section">
+          <label>Vol</label>
+          <input id="volume-slider" type="range" min="0" max="100" value="30" />
+          <button id="mute-btn" title="Mute (M)">&#x1F50A;</button>
+          <label>Speed</label>
+          <input id="time-scale" type="range" min="0.1" max="2" step="0.1" value="1.0" />
+          <span id="time-scale-value">1.0x</span>
+        </div>
+        <div class="ctrl-divider"></div>
+        <span class="hint">Space W/S D E G F V P A H M .:step [ ]</span>
+      </div>
+      <div id="dyno-help" style="display:none">
+        <div class="dyno-help-content">
+          <div class="dyno-help-title">Dynamometer Modes</div>
+          <p class="dyno-help-intro">
+            A dynamometer (dyno) is a device that applies a controlled load to the engine,
+            allowing you to measure and regulate its output. In this simulation the dyno sits
+            on the crankshaft and can operate in three modes:
+          </p>
+          <div class="dyno-help-modes">
+            <div class="dyno-help-mode">
+              <div class="dyno-help-mode-name" style="color:#4ade80">Speed</div>
+              <div class="dyno-help-mode-desc">
+                <strong>Holds a target RPM.</strong> A PI controller automatically adjusts the
+                throttle so the engine converges on whatever RPM you set. The dyno applies a
+                light absorber load (proportional to speed). This is the default mode
+                &mdash; set an RPM and the engine will reach and maintain it.
+                Use <strong>Sweep</strong> to automatically ramp through the full RPM range
+                and plot a torque/power curve.
+              </div>
+            </div>
+            <div class="dyno-help-mode">
+              <div class="dyno-help-mode-name" style="color:#f59e0b">Load</div>
+              <div class="dyno-help-mode-desc">
+                <strong>Applies a constant braking torque.</strong> You set both the throttle
+                and the load (in N&middot;m). The engine will settle at whatever RPM balances
+                its torque output against the fixed load. Open the throttle wider and RPM
+                rises; increase the load and RPM drops. This simulates a simple
+                absorption dynamometer like a water brake or eddy-current brake.
+              </div>
+            </div>
+            <div class="dyno-help-mode">
+              <div class="dyno-help-mode-name" style="color:#22d3ee">Power</div>
+              <div class="dyno-help-mode-desc">
+                <strong>Absorbs a constant power.</strong> The dyno computes the required
+                braking torque each instant as &tau; = P / &omega; (a hyperbolic load curve).
+                At low RPM the load torque is high; at high RPM it&rsquo;s low &mdash; but
+                absorbed power stays constant. You control the throttle manually. This mode
+                answers the question: <em>&ldquo;at what RPM and throttle can this engine
+                sustain a given power output?&rdquo;</em>
+              </div>
+            </div>
+          </div>
+          <div class="dyno-help-footer">
+            <strong>K</strong> &mdash; PI controller gain (Speed mode only). Higher values
+            make the controller more aggressive.
           </div>
         </div>
       </div>

@@ -17,6 +17,13 @@ export PATH="/c/Users/mrmar/.cargo/bin:/c/Users/mrmar/.bun/bin:$PATH"
 - **Frontend build:** `bun run build` from `web/`
 - **Dev server:** `bun run dev` from `web/`
 
+## CSS Rules
+
+- **Never use px for layout sizing** — use `rem`, `em`, `%`, or `flex` instead
+- Base font size is set via `:root { font-size: 13px; }` — all other sizes must use `rem`
+- Only exception: `1px` borders are acceptable
+- Prefer `flex` properties and `%` for layout widths/heights
+
 ## Playwright Testing
 
 - **Always pause before screenshotting:** When using the Playwright MCP to test the app, always wait (e.g. `browser_wait_for` with a short delay) before taking a screenshot. This ensures animations and async rendering have settled.

@@ -36,12 +36,15 @@ pub fn piston_friction_force(
     }
 }
 
-/// Simple bearing friction torque: constant + speed-dependent.
+/// Stribeck-curve bearing friction torque.
+/// Boundary friction dominates at low speed (realistic starter load ~1.8 N·m),
+/// minimum at moderate RPM, rising quadratically at high RPM.
 pub fn bearing_friction_torque(omega: f64) -> f64 {
-    // Constant drag + viscous component
-    let constant_drag = 0.5; // N·m
-    let viscous_coeff = 0.001; // N·m·s/rad
-    -(constant_drag + viscous_coeff * omega.abs())
+    let w = omega.abs();
+    let boundary = 1.5 * (-w / 10.0).exp(); // boundary friction, decays with speed
+    let hydrodynamic_min = 0.5; // minimum friction floor (matches accessories + oil drag)
+    let viscous = 1.5e-6 * w * w; // quadratic viscous rise at high RPM
+    -(boundary + hydrodynamic_min + viscous)
 }
 
 #[cfg(test)]

@@ -18,5 +18,5 @@ version = "0.3"
 features = ["console"]
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 lto = true

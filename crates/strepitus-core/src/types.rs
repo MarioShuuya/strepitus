@@ -49,6 +49,10 @@ pub struct SimulationState {
     pub cycle_avg_torque: f64,
     /// Intake manifold pressure in Pa.
     pub manifold_pressure: f64,
+    /// Exhaust pulse intensity [0,1] — pressure ratio at blowdown.
+    pub exhaust_pulse_intensity: f64,
+    /// Exhaust gas temperature at EVO in K.
+    pub exhaust_gas_temp: f64,
 }
 
 #[wasm_bindgen]
@@ -83,6 +87,8 @@ impl Default for SimulationState {
             cycle_frequency: 0.0,
             cycle_avg_torque: 0.0,
             manifold_pressure: 101_325.0,
+            exhaust_pulse_intensity: 0.0,
+            exhaust_gas_temp: 300.0,
         }
     }
 }
@@ -105,6 +111,10 @@ pub struct CylinderSnapshot {
     pub gas_force: f64,
     pub inertia_force: f64,
     pub friction_force: f64,
+    /// Exhaust pulse intensity [0,1] — pressure ratio at blowdown.
+    pub exhaust_pulse_intensity: f64,
+    /// Exhaust gas temperature at EVO in K.
+    pub exhaust_gas_temp: f64,
 }
 
 // ── Multi-cylinder state (Phase 8) ─────────────────────────────────
@@ -133,6 +143,32 @@ impl MultiCylinderState {
     #[wasm_bindgen(js_name = cylindersJSON)]
     pub fn cylinders_json(&self) -> String {
         serde_json::to_string(&self.snapshots).unwrap_or_default()
+    }
+
+    /// Pack per-cylinder data into a flat Vec<f64> for fast WASM→JS transport.
+    /// Layout: CYLINDER_FLAT_FIELDS (15) fields × N cylinders, packed sequentially.
+    /// ⚠ SYNC: Field order must match `CYLINDER_FLAT_FIELDS` unpacking in web/src/main.ts
+    #[wasm_bindgen(js_name = cylindersFlat)]
+    pub fn cylinders_flat(&self) -> Vec<f64> {
+        let mut out = Vec::with_capacity(self.snapshots.len() * 15);
+        for s in &self.snapshots {
+            out.push(s.crank_angle);
+            out.push(s.piston_position);
+            out.push(s.cylinder_pressure);
+            out.push(s.gas_temperature);
+            out.push(s.wall_temperature);
+            out.push(s.stroke_phase as f64);
+            out.push(s.intake_valve_lift);
+            out.push(s.exhaust_valve_lift);
+            out.push(s.burn_fraction);
+            out.push(s.cylinder_volume);
+            out.push(s.gas_force);
+            out.push(s.inertia_force);
+            out.push(s.friction_force);
+            out.push(s.exhaust_pulse_intensity);
+            out.push(s.exhaust_gas_temp);
+        }
+        out
     }
 }
 

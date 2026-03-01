@@ -134,6 +134,7 @@ fn default_dyno_load_torque() -> f64 {
 impl EngineConfig {
     /// Compute crank offsets in radians from config.
     /// If `crank_offsets_deg` is empty, uses built-in tables for common layouts.
+    /// ⚠ SYNC: Built-in tables must match `LAYOUTS` in web/src/renderer/engine-view.ts
     pub fn firing_offsets(&self) -> Vec<f64> {
         let n = self.cylinder_count.max(1) as usize;
         if n == 1 {

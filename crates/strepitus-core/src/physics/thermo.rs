@@ -3,11 +3,33 @@ use crate::engine::config::EngineConfig;
 /// Specific gas constant for air in J/(kg·K).
 pub const R_AIR: f64 = 287.0;
 
-/// Ratio of specific heats for air (γ).
+/// Ratio of specific heats for air (γ) — reference value at 300K.
 pub const GAMMA_AIR: f64 = 1.4;
 
-/// Ratio of specific heats for combustion products.
+/// Ratio of specific heats for combustion products — reference value.
 pub const GAMMA_BURNED: f64 = 1.25;
+
+/// Temperature-dependent γ for air (JANAF linear fit).
+/// Drops from ~1.4 at 300K to ~1.3 at 1500K.
+#[inline]
+pub fn gamma_air_temp(t: f64) -> f64 {
+    (1.4 - 8.33e-5 * (t - 300.0)).clamp(1.28, 1.4)
+}
+
+/// Temperature-dependent γ for burned gas (JANAF linear fit).
+/// Drops from ~1.25 at 300K to ~1.17 at 1500K.
+#[inline]
+pub fn gamma_burned_temp(t: f64) -> f64 {
+    (1.25 - 6.67e-5 * (t - 300.0)).clamp(1.15, 1.25)
+}
+
+/// Effective combustion duration scaled by RPM.
+/// Combustion takes roughly constant time, so it spans more crank degrees at higher RPM.
+#[inline]
+pub fn rpm_scaled_combustion_duration(base_duration_deg: f64, rpm: f64) -> f64 {
+    let scale = (rpm / 3000.0).powf(0.3);
+    (base_duration_deg * scale).clamp(30.0, 90.0)
+}
 
 /// Ideal gas law: P = m·R·T / V.
 pub fn pressure_from_state(gas_mass: f64, temperature: f64, volume: f64) -> f64 {
@@ -146,6 +168,46 @@ mod tests {
     fn wiebe_reaches_near_one_at_end() {
         let burn = wiebe_burn_fraction(385.0, 25.0, 50.0, 5.0, 2.0);
         assert!(burn > 0.99, "Wiebe should be ~1.0 at end of window, got {burn}");
+    }
+
+    #[test]
+    fn gamma_air_at_300k() {
+        let g = gamma_air_temp(300.0);
+        assert!((g - 1.4).abs() < 1e-6, "γ_air at 300K should be 1.4, got {g}");
+    }
+
+    #[test]
+    fn gamma_air_decreases_with_temperature() {
+        let g_low = gamma_air_temp(300.0);
+        let g_high = gamma_air_temp(1200.0);
+        assert!(g_high < g_low, "γ_air should decrease with temperature");
+    }
+
+    #[test]
+    fn gamma_burned_at_300k() {
+        let g = gamma_burned_temp(300.0);
+        assert!((g - 1.25).abs() < 1e-6, "γ_burned at 300K should be 1.25, got {g}");
+    }
+
+    #[test]
+    fn rpm_scaled_duration_at_3000() {
+        let d = rpm_scaled_combustion_duration(50.0, 3000.0);
+        assert!((d - 50.0).abs() < 0.5, "At 3000 RPM scale should be ~1.0, got {d}");
+    }
+
+    #[test]
+    fn rpm_scaled_duration_increases_with_rpm() {
+        let d_low = rpm_scaled_combustion_duration(50.0, 1000.0);
+        let d_high = rpm_scaled_combustion_duration(50.0, 6000.0);
+        assert!(d_high > d_low, "Higher RPM should increase crank degrees");
+    }
+
+    #[test]
+    fn rpm_scaled_duration_clamps() {
+        let d = rpm_scaled_combustion_duration(10.0, 500.0);
+        assert!(d >= 30.0, "Should clamp to minimum 30°, got {d}");
+        let d2 = rpm_scaled_combustion_duration(100.0, 10000.0);
+        assert!(d2 <= 90.0, "Should clamp to maximum 90°, got {d2}");
     }
 
     #[test]

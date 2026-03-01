@@ -41,12 +41,20 @@ impl Crankshaft {
         omega * r * (sin_theta + lambda * sin_theta * cos_theta / denom)
     }
 
-    /// Piston acceleration (m/s²) — second-order approximation.
+    /// Piston acceleration (m/s²) — exact analytical derivative of piston_velocity.
     pub fn piston_acceleration(config: &EngineConfig, crank_angle: f64, omega: f64) -> f64 {
         let r = Self::crank_radius(config);
         let lambda = Self::rod_ratio(config);
+        let sin_theta = crank_angle.sin();
+        let cos_theta = crank_angle.cos();
+        let l2s2 = lambda * lambda * sin_theta * sin_theta;
+        let denom = (1.0 - l2s2).sqrt();
+        let denom3 = denom * denom * denom;
 
-        omega * omega * r * (crank_angle.cos() + lambda * (2.0 * crank_angle).cos())
+        let cos2 = (2.0 * crank_angle).cos();
+        let l2_sin2_cos2 = lambda * lambda * sin_theta * sin_theta * cos_theta * cos_theta;
+
+        omega * omega * r * (cos_theta + lambda * (cos2 * (1.0 - l2s2) + l2_sin2_cos2) / denom3)
     }
 
     /// Stroke volume (displaced volume) of one cylinder in m³.
@@ -118,6 +126,27 @@ mod tests {
         let v_bdc = Crankshaft::piston_velocity(&cfg, std::f64::consts::PI, omega);
         assert!(v_tdc.abs() < 1e-10, "Velocity at TDC should be ~0, got {v_tdc}");
         assert!(v_bdc.abs() < 1e-10, "Velocity at BDC should be ~0, got {v_bdc}");
+    }
+
+    #[test]
+    fn acceleration_matches_finite_difference_of_velocity() {
+        let cfg = default_config();
+        let omega = 200.0;
+        let h = 1e-6; // tiny angle step for numerical derivative
+        for deg in (0..360).step_by(15) {
+            let theta = (deg as f64).to_radians();
+            let v_plus = Crankshaft::piston_velocity(&cfg, theta + h, omega);
+            let v_minus = Crankshaft::piston_velocity(&cfg, theta - h, omega);
+            // dv/dt = (dv/dθ) · ω, finite difference: dv/dθ ≈ (v(θ+h) - v(θ-h)) / (2h)
+            let numerical_accel = (v_plus - v_minus) / (2.0 * h) * omega;
+            let analytical_accel = Crankshaft::piston_acceleration(&cfg, theta, omega);
+            let err = (numerical_accel - analytical_accel).abs();
+            let tol = analytical_accel.abs().max(1.0) * 1e-4;
+            assert!(
+                err < tol,
+                "Acceleration mismatch at {deg}°: analytical={analytical_accel:.4}, numerical={numerical_accel:.4}, err={err:.6}"
+            );
+        }
     }
 
     #[test]

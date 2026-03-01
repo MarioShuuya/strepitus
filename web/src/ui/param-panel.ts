@@ -7,6 +7,8 @@ import defaultPreset from "../presets/default.json";
 import sportPreset from "../presets/sport.json";
 import economyPreset from "../presets/economy.json";
 import highCompPreset from "../presets/high-comp.json";
+import fa20Preset from "../presets/fa20.json";
+import { LAYOUTS, type LayoutType } from "../renderer/engine-view";
 
 interface ParamMeta {
   key: string;
@@ -138,6 +140,7 @@ const PRESETS: Record<string, Record<string, unknown>> = {
   Sport: sportPreset,
   Economy: economyPreset,
   "High Compression": highCompPreset,
+  "Subaru FA20D": fa20Preset,
 };
 
 const STORAGE_KEY = "strepitus-config";
@@ -147,6 +150,8 @@ export class ParamPanel {
   private sliders: Map<string, HTMLInputElement> = new Map();
   private valueEls: Map<string, HTMLSpanElement> = new Map();
   private presetSelect: HTMLSelectElement | null = null;
+  private layoutTypeSelect: HTMLSelectElement | null = null;
+  private layoutCountSelect: HTMLSelectElement | null = null;
   private config: Record<string, number> = {};
   private onChange: (config: Record<string, unknown>) => void;
 
@@ -211,49 +216,109 @@ export class ParamPanel {
     presetRow.appendChild(exportBtn);
     this.panel.appendChild(presetRow);
 
-    // Cylinder layout selector
+    // Cylinder layout selector — dual dropdown (type + count)
     const layoutRow = document.createElement("div");
     layoutRow.className = "preset-row";
     const layoutLabel = document.createElement("span");
     layoutLabel.textContent = "Layout: ";
     layoutLabel.style.color = "#888";
-    const layoutSelect = document.createElement("select");
-    const layouts: Record<string, { count: number; offsets: number[] }> = {
-      Single: { count: 1, offsets: [] },
-      "Inline-2": { count: 2, offsets: [0, 360] },
-      "Inline-4": { count: 4, offsets: [0, 180, 540, 360] },
-      "V6": { count: 6, offsets: [0, 120, 240, 360, 480, 600] },
-      "V8": { count: 8, offsets: [0, 90, 270, 180, 630, 540, 450, 360] },
-    };
-    for (const name of Object.keys(layouts)) {
+
+    const typeLabels: { type: LayoutType; label: string }[] = [
+      { type: "inline", label: "Inline" },
+      { type: "v", label: "V" },
+      { type: "boxer", label: "Boxer/Flat" },
+    ];
+
+    const typeSelect = document.createElement("select");
+    this.layoutTypeSelect = typeSelect;
+    for (const t of typeLabels) {
       const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
-      if (layouts[name].count === (this.config["cylinder_count"] ?? 1)) {
-        opt.selected = true;
-      }
-      layoutSelect.appendChild(opt);
+      opt.value = t.type;
+      opt.textContent = t.label;
+      typeSelect.appendChild(opt);
     }
-    layoutSelect.addEventListener("change", () => {
-      const layout = layouts[layoutSelect.value];
+
+    const countSelect = document.createElement("select");
+    this.layoutCountSelect = countSelect;
+
+    const currentLayoutType = ((this.config as Record<string, unknown>)["layout_type"] as LayoutType) || "inline";
+    const currentCount = (this.config["cylinder_count"] as number) || 1;
+
+    const populateCountSelect = (type: LayoutType) => {
+      countSelect.innerHTML = "";
+      const matching = LAYOUTS.filter((l) => l.type === type);
+      for (const layout of matching) {
+        const opt = document.createElement("option");
+        opt.value = layout.label;
+        opt.textContent = String(layout.count);
+        countSelect.appendChild(opt);
+      }
+    };
+
+    const syncSelectsToConfig = () => {
+      const lt = ((this.config as Record<string, unknown>)["layout_type"] as LayoutType) || "inline";
+      const cc = (this.config["cylinder_count"] as number) || 1;
+      typeSelect.value = lt;
+      populateCountSelect(lt);
+      // Select the matching count
+      const matching = LAYOUTS.filter((l) => l.type === lt);
+      const match = matching.find((l) => l.count === cc) || matching[0];
+      if (match) {
+        countSelect.value = match.label;
+      }
+    };
+
+    const applyLayout = () => {
+      const selectedType = typeSelect.value as LayoutType;
+      const matching = LAYOUTS.filter((l) => l.type === selectedType);
+      const selectedLabel = countSelect.value;
+      const layout = matching.find((l) => l.label === selectedLabel) || matching[0];
       if (layout) {
         this.config["cylinder_count"] = layout.count;
-        this.config["crank_offsets_deg"] = layout.offsets as unknown as number;
+        (this.config as Record<string, unknown>)["crank_offsets_deg"] = layout.offsets;
+        (this.config as Record<string, unknown>)["layout_type"] = layout.type;
+        this.config["layout_v_angle"] = layout.vAngle ?? 0;
         this.onChange(this.getConfig());
       }
+    };
+
+    typeSelect.addEventListener("change", () => {
+      populateCountSelect(typeSelect.value as LayoutType);
+      applyLayout();
     });
+    countSelect.addEventListener("change", () => {
+      applyLayout();
+    });
+
+    // Initialize
+    syncSelectsToConfig();
+
     layoutRow.appendChild(layoutLabel);
-    layoutRow.appendChild(layoutSelect);
+    layoutRow.appendChild(typeSelect);
+    layoutRow.appendChild(countSelect);
     this.panel.appendChild(layoutRow);
 
-    // Parameter groups
+    // Parameter groups with collapsible accordion
+    let groupIndex = 0;
     for (const group of PARAM_GROUPS) {
       const groupEl = document.createElement("div");
       groupEl.className = "param-group";
 
+      const isFirstGroup = groupIndex === 0;
+
       const title = document.createElement("div");
-      title.className = "group-title";
-      title.textContent = group.title;
+      title.className = "group-title" + (isFirstGroup ? " expanded" : "");
+      title.innerHTML = `<span>${group.title}</span><span class="chevron">&#9656;</span>`;
+
+      const content = document.createElement("div");
+      content.className = "group-content" + (isFirstGroup ? " expanded" : "");
+
+      title.addEventListener("click", () => {
+        const isExpanded = content.classList.contains("expanded");
+        content.classList.toggle("expanded", !isExpanded);
+        title.classList.toggle("expanded", !isExpanded);
+      });
+
       groupEl.appendChild(title);
 
       for (const p of group.params) {
@@ -292,10 +357,12 @@ export class ParamPanel {
         row.appendChild(label);
         row.appendChild(slider);
         row.appendChild(valueSpan);
-        groupEl.appendChild(row);
+        content.appendChild(row);
       }
 
+      groupEl.appendChild(content);
       this.panel.appendChild(groupEl);
+      groupIndex++;
     }
   }
 
@@ -323,6 +390,41 @@ export class ParamPanel {
         }
       }
     }
+
+    // Handle layout fields from preset
+    if ("cylinder_count" in preset) {
+      this.config["cylinder_count"] = preset["cylinder_count"] as number;
+    }
+    if ("crank_offsets_deg" in preset) {
+      (this.config as Record<string, unknown>)["crank_offsets_deg"] = preset["crank_offsets_deg"];
+    }
+    if ("layout_type" in preset) {
+      (this.config as Record<string, unknown>)["layout_type"] = preset["layout_type"];
+    }
+    if ("layout_v_angle" in preset) {
+      this.config["layout_v_angle"] = preset["layout_v_angle"] as number;
+    }
+
+    // Sync layout dropdowns
+    if (this.layoutTypeSelect && this.layoutCountSelect) {
+      const lt = ((this.config as Record<string, unknown>)["layout_type"] as LayoutType) || "inline";
+      const cc = (this.config["cylinder_count"] as number) || 1;
+      this.layoutTypeSelect.value = lt;
+      // Repopulate count options
+      this.layoutCountSelect.innerHTML = "";
+      const matching = LAYOUTS.filter((l) => l.type === lt);
+      for (const layout of matching) {
+        const opt = document.createElement("option");
+        opt.value = layout.label;
+        opt.textContent = String(layout.count);
+        this.layoutCountSelect.appendChild(opt);
+      }
+      const match = matching.find((l) => l.count === cc) || matching[0];
+      if (match) {
+        this.layoutCountSelect.value = match.label;
+      }
+    }
+
     this.onChange(this.getConfig());
   }
 

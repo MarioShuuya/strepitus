@@ -4,21 +4,21 @@
  */
 
 import { initWasm } from "./bridge/wasm";
-import { EngineView, type CylinderData } from "./renderer/engine-view";
+import { EngineView, type CylinderData, type LayoutType } from "./renderer/engine-view";
 import { PVDiagram } from "./renderer/pv-diagram";
 import { TelemetryDisplay, HistoryCharts } from "./ui/graphs";
 import { createControls, updateThrottleSlider, type ControlValues } from "./ui/controls";
 import { ParamPanel } from "./ui/param-panel";
 import { EngineSynthesizer, cylinderCombustion } from "./audio/synthesizer";
 import { AudioMixerPanel } from "./ui/audio-mixer";
+import { ExhaustPanel } from "./ui/exhaust-panel";
 import { DynoSweep } from "./dyno/sweep";
 import { DynoChart } from "./ui/dyno-chart";
+import { LegendPanel } from "./ui/legend-panel";
 
-const statusEl = document.getElementById("status")!;
-
-function setStatus(msg: string, state: "loading" | "ready" | "error") {
-  statusEl.textContent = msg;
-  statusEl.className = state;
+// Status is now shown via KPI bar badge — setStatus is a no-op for legacy calls
+function setStatus(_msg: string, _state: "loading" | "ready" | "error") {
+  // Status info is now integrated into the KPI bar
 }
 
 async function main() {
@@ -86,6 +86,11 @@ async function main() {
       if (singleEngine) singleEngine.set_dyno_load(v);
       if (multiEngine) multiEngine.set_dyno_load(v);
     }
+    function setDynoTargetPower(kw: number) {
+      const watts = kw * 1000;
+      if (singleEngine) singleEngine.set_dyno_target_power(watts);
+      if (multiEngine) multiEngine.set_dyno_target_power(watts);
+    }
     function setTargetRpm(rpm: number) {
       if (singleEngine) singleEngine.set_target_rpm(rpm);
       if (multiEngine) multiEngine.set_target_rpm(rpm);
@@ -93,6 +98,10 @@ async function main() {
     function setThrottle(v: number) {
       if (singleEngine) singleEngine.set_throttle(v);
       if (multiEngine) multiEngine.set_throttle(v);
+    }
+    function startEngine() {
+      if (singleEngine) singleEngine.start();
+      if (multiEngine) multiEngine.start();
     }
     function getThrottle(): number {
       if (singleEngine) return singleEngine.throttle();
@@ -105,23 +114,22 @@ async function main() {
       return 0;
     }
 
-    setStatus(
-      `Strepitus v${wasm.version()} — ${getRpm().toFixed(0)} RPM — Space: pause, ↑↓: RPM`,
-      "ready"
-    );
+    // KPI bar handles status display now
 
     // 3. Set up renderer
     const canvas = document.getElementById("engine-canvas") as HTMLCanvasElement;
     canvas.width = canvas.clientWidth;
     canvas.height = canvas.clientHeight;
-    let view = new EngineView(canvas, bore, stroke, cylinderCount);
+    const layoutType = (configJson.layout_type as LayoutType) || "inline";
+    const vAngle = (configJson.layout_v_angle as number) || 0;
+    let view = new EngineView(canvas, bore, stroke, cylinderCount, layoutType, vAngle);
 
     // 4. P-V diagram
     const pvCanvas = document.getElementById("pv-canvas") as HTMLCanvasElement;
     const pvDiagram = new PVDiagram(pvCanvas);
 
     // 5. Telemetry display + history charts
-    const telemetry = new TelemetryDisplay("telemetry");
+    const telemetry = new TelemetryDisplay("kpi-bar");
     const charts = new HistoryCharts("charts-panel");
 
     // 6. Audio synthesizer
@@ -137,12 +145,43 @@ async function main() {
     }
 
     // Track latest control values so we can re-apply after engine recreation
-    let controlValues: ControlValues = { rpm: 800, running: true, dynoEnabled: true, dynoGain: 1.0, dynoIntegralGain: 0.0, dynoMode: 0, dynoLoadTorque: 0, throttle: 1.0, volume: 0.3, muted: false, timeScale: 1.0 };
+    let controlValues: ControlValues = { rpm: 800, running: true, dynoEnabled: true, dynoGain: 1.0, dynoIntegralGain: 0.0, dynoMode: 0, dynoLoadTorque: 0, dynoTargetPower: 5.0, throttle: 1.0, volume: 0.3, muted: false, timeScale: 1.0 };
 
     // 6b. Audio mixer panel
     const mixerPanel = new AudioMixerPanel("audio-mixer", synth);
 
-    // 7. Parameter panel
+    // 6c. Exhaust panel — wire config changes to both audio and visual
+    const exhaustPanel = new ExhaustPanel("exhaust-panel", synth);
+    exhaustPanel.setOnConfigChange((config) => {
+      view.setExhaustConfig(config);
+    });
+
+    // 7. Legend panel
+    const legendPanel = new LegendPanel("legend-panel");
+
+    function wireLegendHover() {
+      // Legend hover → highlight 3D part
+      legendPanel.setPartHoverCallback((partName) => {
+        view.highlightPart(partName);
+      });
+      // 3D hover → highlight legend entry
+      view.setPartHoverCallback((partName) => {
+        legendPanel.highlightEntry(partName);
+        view.highlightPart(partName);
+      });
+    }
+    wireLegendHover();
+
+    // Canvas mouse events for raycasting
+    canvas.addEventListener("mousemove", (e) => {
+      view.handleMouseMove(e, canvas);
+    });
+    canvas.addEventListener("mouseleave", () => {
+      view.highlightPart(null);
+      legendPanel.highlightEntry(null);
+    });
+
+    // 8. Parameter panel
     const paramPanel = new ParamPanel("param-panel", configJson, (newConfig) => {
       try {
         configJson = newConfig as Record<string, unknown>;
@@ -150,9 +189,14 @@ async function main() {
         setRpm(controlValues.rpm);
         setDynoEnabled(controlValues.dynoEnabled);
         setDynoGain(controlValues.dynoGain);
-        // Recreate view for new bore/stroke/cylinder count
+        // Recreate view for new bore/stroke/cylinder count/layout
         view.dispose();
-        view = new EngineView(canvas, bore, stroke, cylinderCount);
+        const newLayoutType = (configJson.layout_type as LayoutType) || "inline";
+        const newVAngle = (configJson.layout_v_angle as number) || 0;
+        view = new EngineView(canvas, bore, stroke, cylinderCount, newLayoutType, newVAngle);
+        // Re-apply exhaust config to the new view (otherwise it reverts to default)
+        view.setExhaustConfig(exhaustPanel.getConfig());
+        wireLegendHover();
         charts.resetRanges();
       } catch (e) {
         console.error("[strepitus] Config apply error:", e);
@@ -188,8 +232,34 @@ async function main() {
         case "L":
           pvDiagram.setLogScale(!pvDiagram.logScale);
           break;
+        case "h":
+        case "H":
+          legendPanel.toggle();
+          break;
+        case "x":
+        case "X":
+          exhaustPanel.toggle();
+          break;
+        case "e":
+        case "E":
+          startEngine();
+          break;
+        case ".":
+          if (!running) {
+            stepRequested += e.shiftKey ? 10 : 1;
+          }
+          break;
       }
     });
+
+    // Start button
+    const startBtn = document.getElementById("start-btn");
+    if (startBtn) {
+      startBtn.addEventListener("click", () => startEngine());
+    }
+
+    // Pause button
+    const pauseBtn = document.getElementById("pause-btn");
 
     // 9. Controls
     let running = true;
@@ -204,19 +274,15 @@ async function main() {
       setDynoIntegralGain(values.dynoIntegralGain);
       setDynoMode(values.dynoMode);
       setDynoLoad(values.dynoLoadTorque);
+      setDynoTargetPower(values.dynoTargetPower);
       // In speed mode (0/2), PI controller manages throttle; otherwise manual
-      if (!values.dynoEnabled || values.dynoMode === 1) {
+      if (!values.dynoEnabled || values.dynoMode === 1 || values.dynoMode === 3) {
         setThrottle(values.throttle);
       }
       synth.setVolume(values.volume);
       synth.setMuted(values.muted || !values.running);
-      const dynoTag = values.dynoEnabled ? ` · Dyno K=${values.dynoGain}` : " · Dyno OFF";
-      const cylTag = cylinderCount > 1 ? ` · ${cylinderCount}cyl` : "";
-      const speedTag = values.timeScale !== 1.0 ? ` · ${values.timeScale.toFixed(1)}x` : "";
-      setStatus(
-        `Strepitus v${wasm.version()} — ${values.rpm} RPM${running ? "" : " [PAUSED]"}${dynoTag}${cylTag}${speedTag}`,
-        "ready"
-      );
+      // Update pause button label
+      if (pauseBtn) pauseBtn.innerHTML = running ? "&#9646;&#9646;" : "&#9654;";
     });
 
     // Init audio on first user interaction (autoplay policy)
@@ -227,6 +293,16 @@ async function main() {
     };
     document.addEventListener("click", initAudioOnce);
     document.addEventListener("keydown", initAudioOnce);
+
+    // Dyno help toggle
+    const dynoInfoBtn = document.getElementById("dyno-info-btn");
+    const dynoHelp = document.getElementById("dyno-help");
+    if (dynoInfoBtn && dynoHelp) {
+      dynoInfoBtn.addEventListener("click", () => {
+        const shown = dynoHelp.style.display !== "none";
+        dynoHelp.style.display = shown ? "none" : "block";
+      });
+    }
 
     // P-V diagram info toggle
     const pvInfoBtn = document.getElementById("pv-info-btn");
@@ -275,171 +351,253 @@ async function main() {
       activeSweep.start(setTargetRpm, setDynoMode);
     });
 
-    // 11. Simulation loop
+    // 11. Background tab pause — skip physics + rendering when hidden
+    let tabHidden = false;
+    document.addEventListener("visibilitychange", () => {
+      tabHidden = document.hidden;
+      if (!tabHidden) {
+        // Reset lastTime on return to avoid giant dt spike
+        lastTime = performance.now();
+      }
+    });
+
+    // 12. Simulation loop
     let lastTime = performance.now();
+    let stepRequested = 0;
+
+    // FPS / sim tick counter
+    let fpsFrameCount = 0;
+    let fpsSimTicks = 0;
+    let fpsLastSample = performance.now();
+    let displayFps = 0;
+    let displayTps = 0;
+
+    /** Run one simulation step: physics, view update, telemetry, charts, audio */
+    function performSimStep(dt: number, updateAudio: boolean): void {
+      if (singleEngine) {
+        // Single-cylinder path
+        const state = singleEngine.step(dt);
+
+        view.update({
+          piston_position: state.piston_position,
+          crank_angle: state.crank_angle,
+          intake_valve_lift: state.intake_valve_lift,
+          exhaust_valve_lift: state.exhaust_valve_lift,
+          cylinder_pressure: state.cylinder_pressure,
+          gas_temperature: state.gas_temperature,
+          wall_temperature: state.wall_temperature,
+          stroke_phase: state.stroke_phase,
+          burn_fraction: state.burn_fraction,
+          cylinder_volume: state.cylinder_volume,
+          gas_force: state.gas_force,
+          inertia_force: state.inertia_force,
+          friction_force: state.friction_force,
+          throttle_position: getThrottle(),
+          manifold_pressure: state.manifold_pressure,
+        });
+
+        view.setRpm(state.rpm);
+        smoothedTorque += torqueAlpha * (state.torque - smoothedTorque);
+        const powerKw = smoothedTorque * state.rpm / 9549;
+
+        const isSpeedMode = controlValues.dynoEnabled && (controlValues.dynoMode === 0 || controlValues.dynoMode === 2);
+        updateThrottleSlider(getThrottle(), isSpeedMode);
+
+        telemetry.update({
+          rpm: state.rpm,
+          cylinder_pressure: state.cylinder_pressure,
+          gas_temperature: state.gas_temperature,
+          stroke_phase: state.stroke_phase,
+          piston_position: state.piston_position,
+          crank_angle: state.crank_angle,
+          power_kw: powerKw,
+          manifold_pressure: state.manifold_pressure,
+          throttle: getThrottle(),
+          fps: displayFps,
+          tps: displayTps,
+          torque: smoothedTorque,
+        });
+
+        charts.update({
+          rpm: state.rpm,
+          cylinder_pressure: state.cylinder_pressure,
+          gas_temperature: state.gas_temperature,
+          wall_temperature: state.wall_temperature,
+          torque: state.torque,
+          burn_fraction: state.burn_fraction,
+          cylinder_volume: state.cylinder_volume,
+          crank_angle: state.crank_angle,
+          gas_force: state.gas_force,
+          inertia_force: state.inertia_force,
+          friction_force: state.friction_force,
+          power_kw: powerKw,
+          manifold_pressure: state.manifold_pressure,
+        });
+
+        pvDiagram.push(state.cylinder_volume, state.cylinder_pressure, state.stroke_phase);
+        pvDiagram.render();
+
+        if (updateAudio) {
+          synth.update({
+            mechanical_noise: state.mechanical_noise,
+            cycle_frequency: state.cycle_frequency,
+            rpm: state.rpm,
+            cylinders: [{
+              combustion_intensity: state.combustion_intensity,
+              stroke_phase: state.stroke_phase,
+              intake_valve_lift: state.intake_valve_lift,
+              exhaust_valve_lift: state.exhaust_valve_lift,
+              burn_fraction: state.burn_fraction,
+              cylinder_pressure: state.cylinder_pressure,
+              exhaust_pulse_intensity: state.exhaust_pulse_intensity,
+              exhaust_gas_temp: state.exhaust_gas_temp,
+            }],
+          });
+        }
+
+        // Tick sweep if active
+        if (activeSweep) {
+          activeSweep.tick(dt, state.cycle_avg_torque);
+        }
+
+        // Free WASM object to prevent memory leak
+        state.free();
+      } else if (multiEngine) {
+        // Multi-cylinder path
+        const mstate = multiEngine.step(dt);
+        const flat = mstate.cylindersFlat() as unknown as Float64Array;
+        // ⚠ SYNC: Must match field push order in crates/strepitus-core/src/types.rs cylinders_flat()
+        const CYLINDER_FLAT_FIELDS = 15;
+        const nCyl = flat.length / CYLINDER_FLAT_FIELDS;
+        const cylinders: CylinderData[] = new Array(nCyl);
+        for (let ci = 0; ci < nCyl; ci++) {
+          const o = ci * CYLINDER_FLAT_FIELDS;
+          cylinders[ci] = {
+            crank_angle: flat[o],
+            piston_position: flat[o + 1],
+            cylinder_pressure: flat[o + 2],
+            gas_temperature: flat[o + 3],
+            wall_temperature: flat[o + 4],
+            stroke_phase: flat[o + 5],
+            intake_valve_lift: flat[o + 6],
+            exhaust_valve_lift: flat[o + 7],
+            burn_fraction: flat[o + 8],
+            cylinder_volume: flat[o + 9],
+            gas_force: flat[o + 10],
+            inertia_force: flat[o + 11],
+            friction_force: flat[o + 12],
+            exhaust_pulse_intensity: flat[o + 13],
+            exhaust_gas_temp: flat[o + 14],
+          };
+        }
+
+        view.updateMulti(cylinders);
+        view.updateThrottle(getThrottle(), cylinders);
+        view.setRpm(mstate.rpm);
+
+        smoothedTorque += torqueAlpha * (mstate.total_torque - smoothedTorque);
+        const powerKw = smoothedTorque * mstate.rpm / 9549;
+
+        const isSpeedModeM = controlValues.dynoEnabled && (controlValues.dynoMode === 0 || controlValues.dynoMode === 2);
+        updateThrottleSlider(getThrottle(), isSpeedModeM);
+
+        const c0 = cylinders[0];
+        if (c0) {
+          telemetry.update({
+            rpm: mstate.rpm,
+            cylinder_pressure: c0.cylinder_pressure,
+            gas_temperature: c0.gas_temperature,
+            stroke_phase: c0.stroke_phase,
+            piston_position: c0.piston_position,
+            crank_angle: c0.crank_angle,
+            power_kw: powerKw,
+            manifold_pressure: mstate.manifold_pressure,
+            throttle: getThrottle(),
+            fps: displayFps,
+            tps: displayTps,
+            torque: smoothedTorque,
+            cylinders: cylinders,
+          });
+
+          charts.update({
+            rpm: mstate.rpm,
+            cylinder_pressure: c0.cylinder_pressure,
+            gas_temperature: c0.gas_temperature,
+            wall_temperature: c0.wall_temperature,
+            torque: mstate.total_torque,
+            burn_fraction: c0.burn_fraction,
+            cylinder_volume: c0.cylinder_volume,
+            crank_angle: c0.crank_angle,
+            gas_force: c0.gas_force,
+            inertia_force: c0.inertia_force,
+            friction_force: c0.friction_force,
+            power_kw: powerKw,
+            manifold_pressure: mstate.manifold_pressure,
+          });
+
+          pvDiagram.push(c0.cylinder_volume, c0.cylinder_pressure, c0.stroke_phase);
+          pvDiagram.render();
+        }
+
+        if (updateAudio) {
+          synth.update({
+            mechanical_noise: mstate.mechanical_noise,
+            cycle_frequency: mstate.cycle_frequency,
+            rpm: mstate.rpm,
+            cylinders: cylinders.map((cyl) => ({
+              combustion_intensity: cylinderCombustion(cyl.cylinder_pressure, cyl.stroke_phase),
+              stroke_phase: cyl.stroke_phase,
+              intake_valve_lift: cyl.intake_valve_lift,
+              exhaust_valve_lift: cyl.exhaust_valve_lift,
+              burn_fraction: cyl.burn_fraction,
+              cylinder_pressure: cyl.cylinder_pressure,
+              exhaust_pulse_intensity: cyl.exhaust_pulse_intensity,
+              exhaust_gas_temp: cyl.exhaust_gas_temp,
+            })),
+          });
+        }
+
+        // Tick sweep if active
+        if (activeSweep) {
+          activeSweep.tick(dt, mstate.cycle_avg_torque);
+        }
+
+        // Free WASM object to prevent memory leak
+        mstate.free();
+      }
+    }
 
     function loop(now: number) {
       const dt = Math.min((now - lastTime) / 1000, 0.05) * timeScale;
       lastTime = now;
 
+      if (tabHidden) {
+        requestAnimationFrame(loop);
+        return;
+      }
+
       if (running) {
-        let currentTorque = 0;
-        let currentRpm = 0;
-        let currentCycleAvgTorque = 0;
+        performSimStep(dt, audioInitialized);
+        fpsSimTicks++;
+      }
 
-        if (singleEngine) {
-          // Single-cylinder path
-          const state = singleEngine.step(dt);
-          currentTorque = state.torque;
-          currentRpm = state.rpm;
-          currentCycleAvgTorque = state.cycle_avg_torque;
+      // Tick-by-tick stepping when paused
+      while (!running && stepRequested > 0) {
+        stepRequested--;
+        const rpm = getRpm();
+        const stepDt = rpm > 0 ? (1.0 / (6.0 * rpm)) : 0.001; // ~1 crank degree
+        performSimStep(stepDt, false);
+        fpsSimTicks++;
+      }
 
-          view.update({
-            piston_position: state.piston_position,
-            crank_angle: state.crank_angle,
-            intake_valve_lift: state.intake_valve_lift,
-            exhaust_valve_lift: state.exhaust_valve_lift,
-            cylinder_pressure: state.cylinder_pressure,
-            gas_temperature: state.gas_temperature,
-            wall_temperature: state.wall_temperature,
-            stroke_phase: state.stroke_phase,
-            burn_fraction: state.burn_fraction,
-            cylinder_volume: state.cylinder_volume,
-            gas_force: state.gas_force,
-            inertia_force: state.inertia_force,
-            friction_force: state.friction_force,
-            throttle_position: getThrottle(),
-            manifold_pressure: state.manifold_pressure,
-          });
-
-          smoothedTorque += torqueAlpha * (state.torque - smoothedTorque);
-          const powerKw = smoothedTorque * state.rpm / 9549;
-
-          // Update throttle slider readback
-          const isSpeedMode = controlValues.dynoEnabled && controlValues.dynoMode !== 1;
-          updateThrottleSlider(getThrottle(), isSpeedMode);
-
-          telemetry.update({
-            rpm: state.rpm,
-            cylinder_pressure: state.cylinder_pressure,
-            gas_temperature: state.gas_temperature,
-            stroke_phase: state.stroke_phase,
-            piston_position: state.piston_position,
-            crank_angle: state.crank_angle,
-            power_kw: powerKw,
-            manifold_pressure: state.manifold_pressure,
-            throttle: getThrottle(),
-          });
-
-          charts.update({
-            rpm: state.rpm,
-            cylinder_pressure: state.cylinder_pressure,
-            gas_temperature: state.gas_temperature,
-            wall_temperature: state.wall_temperature,
-            torque: state.torque,
-            burn_fraction: state.burn_fraction,
-            cylinder_volume: state.cylinder_volume,
-            crank_angle: state.crank_angle,
-            gas_force: state.gas_force,
-            inertia_force: state.inertia_force,
-            friction_force: state.friction_force,
-            power_kw: powerKw,
-            manifold_pressure: state.manifold_pressure,
-          });
-
-          pvDiagram.push(state.cylinder_volume, state.cylinder_pressure, state.stroke_phase);
-          pvDiagram.render();
-
-          if (audioInitialized) {
-            synth.update({
-              mechanical_noise: state.mechanical_noise,
-              cycle_frequency: state.cycle_frequency,
-              rpm: state.rpm,
-              cylinders: [{
-                combustion_intensity: state.combustion_intensity,
-                stroke_phase: state.stroke_phase,
-                intake_valve_lift: state.intake_valve_lift,
-                exhaust_valve_lift: state.exhaust_valve_lift,
-                burn_fraction: state.burn_fraction,
-                cylinder_pressure: state.cylinder_pressure,
-              }],
-            });
-          }
-        } else if (multiEngine) {
-          // Multi-cylinder path
-          const mstate = multiEngine.step(dt);
-          const cylJson = mstate.cylindersJSON();
-          const cylinders: CylinderData[] = JSON.parse(cylJson);
-          currentTorque = mstate.total_torque;
-          currentRpm = mstate.rpm;
-          currentCycleAvgTorque = mstate.cycle_avg_torque;
-
-          view.updateMulti(cylinders);
-          view.updateThrottle(getThrottle(), cylinders);
-
-          smoothedTorque += torqueAlpha * (mstate.total_torque - smoothedTorque);
-          const powerKw = smoothedTorque * mstate.rpm / 9549;
-
-          // Update throttle slider readback
-          const isSpeedModeM = controlValues.dynoEnabled && controlValues.dynoMode !== 1;
-          updateThrottleSlider(getThrottle(), isSpeedModeM);
-
-          // Telemetry: show cylinder 0 data
-          const c0 = cylinders[0];
-          if (c0) {
-            telemetry.update({
-              rpm: mstate.rpm,
-              cylinder_pressure: c0.cylinder_pressure,
-              gas_temperature: c0.gas_temperature,
-              stroke_phase: c0.stroke_phase,
-              piston_position: c0.piston_position,
-              crank_angle: c0.crank_angle,
-              power_kw: powerKw,
-              manifold_pressure: mstate.manifold_pressure,
-              throttle: getThrottle(),
-            });
-
-            charts.update({
-              rpm: mstate.rpm,
-              cylinder_pressure: c0.cylinder_pressure,
-              gas_temperature: c0.gas_temperature,
-              wall_temperature: c0.wall_temperature,
-              torque: mstate.total_torque,
-              burn_fraction: c0.burn_fraction,
-              cylinder_volume: c0.cylinder_volume,
-              crank_angle: c0.crank_angle,
-              gas_force: c0.gas_force,
-              inertia_force: c0.inertia_force,
-              friction_force: c0.friction_force,
-              power_kw: powerKw,
-              manifold_pressure: mstate.manifold_pressure,
-            });
-
-            pvDiagram.push(c0.cylinder_volume, c0.cylinder_pressure, c0.stroke_phase);
-            pvDiagram.render();
-          }
-
-          if (audioInitialized) {
-            synth.update({
-              mechanical_noise: mstate.mechanical_noise,
-              cycle_frequency: mstate.cycle_frequency,
-              rpm: mstate.rpm,
-              cylinders: cylinders.map((cyl) => ({
-                combustion_intensity: cylinderCombustion(cyl.cylinder_pressure, cyl.stroke_phase),
-                stroke_phase: cyl.stroke_phase,
-                intake_valve_lift: cyl.intake_valve_lift,
-                exhaust_valve_lift: cyl.exhaust_valve_lift,
-                burn_fraction: cyl.burn_fraction,
-                cylinder_pressure: cyl.cylinder_pressure,
-              })),
-            });
-          }
-        }
-
-        // Tick sweep if active — feed Rust-computed cycle-averaged torque
-        if (activeSweep) {
-          activeSweep.tick(dt, currentCycleAvgTorque);
-        }
+      fpsFrameCount++;
+      const fpsDelta = now - fpsLastSample;
+      if (fpsDelta >= 1000) {
+        displayFps = Math.round(fpsFrameCount * 1000 / fpsDelta);
+        displayTps = Math.round(fpsSimTicks * 1000 / fpsDelta);
+        fpsFrameCount = 0;
+        fpsSimTicks = 0;
+        fpsLastSample = now;
       }
 
       view.render();

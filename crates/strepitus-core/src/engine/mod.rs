@@ -40,18 +40,18 @@ fn manifold_pressure(throttle: f64, ambient: f64) -> f64 {
 }
 
 /// Starter motor torque. Cranks the engine when RPM is below cranking speed
-/// and the throttle is open (> 10%). Delivers ~15 N·m at stall, tapering off
-/// as the engine catches. Returns 0 if throttle is closed or RPM is above
-/// cranking speed (300 RPM).
-fn starter_torque(omega: f64, throttle: f64) -> f64 {
+/// and the starter is engaged. Delivers ~80 N·m at stall (realistic for a
+/// small-engine starter motor ~1.2 kW), tapering off as RPM rises.
+/// Returns 0 if the starter is not engaged or RPM is above cranking speed.
+fn starter_torque(omega: f64, starter_engaged: bool) -> f64 {
     let cranking_rpm = 300.0;
     let cranking_omega = cranking_rpm * 2.0 * std::f64::consts::PI / 60.0;
-    if throttle < 0.10 || omega > cranking_omega {
+    if !starter_engaged || omega > cranking_omega {
         return 0.0;
     }
     // Taper: full torque at 0 RPM, zero at cranking_omega
     let ratio = (omega / cranking_omega).clamp(0.0, 1.0);
-    15.0 * (1.0 - ratio)
+    80.0 * (1.0 - ratio)
 }
 
 /// Step a single cylinder through one physics sub-step.
@@ -90,6 +90,9 @@ fn step_cylinder(
         3 // Exhaust
     };
 
+    // Save pre-capture blowdown state for event detection
+    let pre_blowdown_pressure = cyl.blowdown_pressure;
+
     // Thermodynamic state update by stroke phase
     match stroke_phase {
         0 => {
@@ -99,18 +102,26 @@ fn step_cylinder(
                 / (thermo::R_AIR * config.ambient_temperature);
             cyl.burn_fraction = 0.0;
             cyl.prev_burn_fraction = 0.0;
+            // Reset blowdown state for next cycle
+            cyl.blowdown_pressure = config.ambient_pressure;
+            cyl.blowdown_temperature = config.ambient_temperature;
         }
         1 | 2 => {
+            let rpm = omega * 60.0 / (2.0 * std::f64::consts::PI);
+            let eff_duration = thermo::rpm_scaled_combustion_duration(
+                config.combustion_duration, rpm,
+            );
             let burn = thermo::wiebe_burn_fraction(
                 crank_deg,
                 config.spark_advance,
-                config.combustion_duration,
+                eff_duration,
                 config.wiebe_a,
                 config.wiebe_m,
             );
             let delta_burn = (burn - cyl.prev_burn_fraction).max(0.0);
-            let gamma =
-                thermo::GAMMA_AIR * (1.0 - burn) + thermo::GAMMA_BURNED * burn;
+            let g_air = thermo::gamma_air_temp(cyl.temperature);
+            let g_burned = thermo::gamma_burned_temp(cyl.temperature);
+            let gamma = g_air * (1.0 - burn) + g_burned * burn;
 
             if prev_volume > 0.0 && new_volume > 0.0 {
                 cyl.temperature = thermo::isentropic_temperature(
@@ -134,8 +145,26 @@ fn step_cylinder(
             cyl.prev_burn_fraction = burn;
         }
         _ => {
-            cyl.pressure = config.ambient_pressure;
-            cyl.gas_mass = config.ambient_pressure * new_volume
+            // Exhaust stroke: blowdown decay instead of snap-to-ambient
+            // Capture blowdown conditions at start of exhaust (pressure still elevated)
+            if cyl.pressure > config.ambient_pressure * 1.1 && cyl.blowdown_pressure <= config.ambient_pressure * 1.1 {
+                cyl.blowdown_pressure = cyl.pressure;
+                cyl.blowdown_temperature = cyl.temperature;
+            }
+
+            // Exponential pressure decay toward ambient
+            let exhaust_lift = ValveTrain::exhaust_lift(config, crank_deg);
+            let lift_fraction = (exhaust_lift / config.max_exhaust_lift).clamp(0.01, 1.0);
+            let tau_blowdown = 0.002 / lift_fraction;
+            let decay_factor = (-dt / tau_blowdown).exp();
+            cyl.pressure = config.ambient_pressure + (cyl.pressure - config.ambient_pressure) * decay_factor;
+
+            // Temperature also decays toward ambient
+            let temp_tau = tau_blowdown * 3.0; // slower thermal equilibrium
+            let temp_decay = (-dt / temp_tau).exp();
+            cyl.temperature = config.ambient_temperature + (cyl.temperature - config.ambient_temperature) * temp_decay;
+
+            cyl.gas_mass = cyl.pressure * new_volume
                 / (thermo::R_AIR * cyl.temperature);
             cyl.burn_fraction = 0.0;
             cyl.prev_burn_fraction = 0.0;
@@ -145,11 +174,12 @@ fn step_cylinder(
     // Heat transfer
     let gamma = match stroke_phase {
         1 | 2 => {
-            thermo::GAMMA_AIR * (1.0 - cyl.burn_fraction)
-                + thermo::GAMMA_BURNED * cyl.burn_fraction
+            let g_a = thermo::gamma_air_temp(cyl.temperature);
+            let g_b = thermo::gamma_burned_temp(cyl.temperature);
+            g_a * (1.0 - cyl.burn_fraction) + g_b * cyl.burn_fraction
         }
-        3 => thermo::GAMMA_BURNED,
-        _ => thermo::GAMMA_AIR,
+        3 => thermo::gamma_burned_temp(cyl.temperature),
+        _ => thermo::gamma_air_temp(cyl.temperature),
     };
     let cv = thermo::R_AIR / (gamma - 1.0);
 
@@ -175,8 +205,13 @@ fn step_cylinder(
                 / (thermo::R_AIR * cyl.temperature);
         }
         3 => {
-            cyl.pressure = config.ambient_pressure;
-            cyl.gas_mass = config.ambient_pressure * new_volume
+            // Post-heat-transfer exhaust: continue blowdown decay
+            let exhaust_lift = ValveTrain::exhaust_lift(config, crank_deg);
+            let lift_fraction = (exhaust_lift / config.max_exhaust_lift).clamp(0.01, 1.0);
+            let tau_blowdown = 0.002 / lift_fraction;
+            let decay_factor = (-dt / tau_blowdown).exp();
+            cyl.pressure = config.ambient_pressure + (cyl.pressure - config.ambient_pressure) * decay_factor;
+            cyl.gas_mass = cyl.pressure * new_volume
                 / (thermo::R_AIR * cyl.temperature);
         }
         _ => {
@@ -211,6 +246,23 @@ fn step_cylinder(
     let intake_lift = ValveTrain::intake_lift(config, crank_deg);
     let exhaust_lift = ValveTrain::exhaust_lift(config, crank_deg);
 
+    // Compute exhaust output fields — event-based: only non-zero at the
+    // moment blowdown is first captured, not throughout the exhaust stroke.
+    // This gives JS a clean one-shot signal per exhaust event.
+    let blowdown_just_fired = stroke_phase == 3
+        && pre_blowdown_pressure <= config.ambient_pressure * 1.1
+        && cyl.blowdown_pressure > config.ambient_pressure * 1.1;
+    let exhaust_pulse_intensity = if blowdown_just_fired {
+        ((cyl.blowdown_pressure / config.ambient_pressure - 1.0) / 3.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let exhaust_gas_temp = if blowdown_just_fired {
+        cyl.blowdown_temperature
+    } else {
+        config.ambient_temperature
+    };
+
     CylinderStepResult {
         snapshot: CylinderSnapshot {
             crank_angle,
@@ -226,6 +278,8 @@ fn step_cylinder(
             gas_force: f_gas,
             inertia_force: f_inertia,
             friction_force: f_friction,
+            exhaust_pulse_intensity,
+            exhaust_gas_temp,
         },
         torque_piston: tau_piston,
     }
@@ -247,12 +301,16 @@ pub struct Engine {
     dyno_enabled: bool,
     /// PI controller integral error accumulator.
     integral_error: f64,
-    /// Dyno mode: 0=speed PI, 1=load, 2=sweep.
+    /// Dyno mode: 0=speed PI, 1=load, 2=sweep, 3=constant power.
     dyno_mode: u8,
     /// Constant load torque for load mode (N·m).
     dyno_load_torque: f64,
+    /// Target power for constant-power mode (W).
+    dyno_target_power: f64,
     /// Throttle position [0, 1]. 1.0 = WOT.
     throttle_position: f64,
+    /// Whether the starter motor is currently engaged.
+    starter_engaged: bool,
     cylinder: CylinderState,
     // Cycle-average torque tracking
     prev_crank_angle: f64,
@@ -278,7 +336,9 @@ impl Engine {
             integral_error: 0.0,
             dyno_mode: 0,
             dyno_load_torque: 10.0,
+            dyno_target_power: 5000.0,
             throttle_position: 1.0,
+            starter_engaged: false,
             cylinder,
             prev_crank_angle: 0.0,
             cycle_torque_work: 0.0,
@@ -298,9 +358,17 @@ impl Engine {
         let sub_dt = dt / n_steps as f64;
 
         let mut state = SimulationState::default();
+        let mut peak_exhaust_pulse = 0.0_f64;
+        let mut peak_exhaust_gas_temp = 300.0_f64;
         for _ in 0..n_steps {
             state = self.step_inner(sub_dt);
+            if state.exhaust_pulse_intensity > peak_exhaust_pulse {
+                peak_exhaust_pulse = state.exhaust_pulse_intensity;
+                peak_exhaust_gas_temp = state.exhaust_gas_temp;
+            }
         }
+        state.exhaust_pulse_intensity = peak_exhaust_pulse;
+        state.exhaust_gas_temp = peak_exhaust_gas_temp;
         state
     }
 
@@ -333,7 +401,7 @@ impl Engine {
         self.config.dyno_integral_gain = gain;
     }
 
-    /// Set dyno mode (0=speed PI, 1=load, 2=sweep). Resets integral error.
+    /// Set dyno mode (0=speed PI, 1=load, 2=sweep, 3=constant power). Resets integral error.
     pub fn set_dyno_mode(&mut self, mode: u8) {
         self.dyno_mode = mode;
         self.integral_error = 0.0;
@@ -342,6 +410,11 @@ impl Engine {
     /// Set dyno load torque for load mode (N·m).
     pub fn set_dyno_load(&mut self, torque: f64) {
         self.dyno_load_torque = torque;
+    }
+
+    /// Set target power for constant-power mode (W).
+    pub fn set_dyno_target_power(&mut self, power: f64) {
+        self.dyno_target_power = power;
     }
 
     /// Set target RPM without forcing omega. Resets integral error.
@@ -358,6 +431,17 @@ impl Engine {
     /// Get current throttle position [0, 1].
     pub fn throttle(&self) -> f64 {
         self.throttle_position
+    }
+
+    /// Engage the starter motor. Gives an initial crank kick and keeps
+    /// the starter engaged until RPM exceeds cranking speed (~300 RPM).
+    pub fn start(&mut self) {
+        self.starter_engaged = true;
+        // Initial kick so the crank begins advancing
+        if self.omega < 5.0 {
+            self.omega = 50.0 * 2.0 * std::f64::consts::PI / 60.0; // ~50 RPM
+        }
+        self.integral_error = 0.0;
     }
 }
 
@@ -387,7 +471,11 @@ impl Engine {
 
         // Bearing friction + load torque
         let tau_bearing = friction::bearing_friction_torque(self.omega);
-        let tau_starter = starter_torque(self.omega, self.throttle_position);
+        let tau_starter = starter_torque(self.omega, self.starter_engaged);
+        // Auto-disengage starter once engine catches
+        if self.starter_engaged && self.omega > 300.0 * 2.0 * PI / 60.0 {
+            self.starter_engaged = false;
+        }
         let tau_load = if self.dyno_enabled {
             match self.dyno_mode {
                 0 | 2 => {
@@ -402,6 +490,16 @@ impl Engine {
                     -self.config.idle_load_torque - 0.05 * self.omega
                 }
                 1 => -self.dyno_load_torque,
+                3 => {
+                    // Constant-power mode: τ = P / ω (hyperbolic load curve)
+                    // Throttle is left under manual control.
+                    let min_omega = 50.0 * 2.0 * PI / 60.0;
+                    if self.omega > min_omega {
+                        -self.dyno_target_power / self.omega
+                    } else {
+                        -self.dyno_target_power / min_omega
+                    }
+                }
                 _ => 0.0,
             }
         } else if self.omega > 0.0 {
@@ -476,6 +574,8 @@ impl Engine {
             cycle_frequency: audio.cycle_frequency,
             cycle_avg_torque: self.cycle_avg_torque,
             manifold_pressure: manifold_p,
+            exhaust_pulse_intensity: snap.exhaust_pulse_intensity,
+            exhaust_gas_temp: snap.exhaust_gas_temp,
         }
     }
 }
@@ -497,12 +597,16 @@ pub struct MultiCylinderEngine {
     dyno_enabled: bool,
     /// PI controller integral error accumulator.
     integral_error: f64,
-    /// Dyno mode: 0=speed PI, 1=load, 2=sweep.
+    /// Dyno mode: 0=speed PI, 1=load, 2=sweep, 3=constant power.
     dyno_mode: u8,
     /// Constant load torque for load mode (N·m).
     dyno_load_torque: f64,
+    /// Target power for constant-power mode (W).
+    dyno_target_power: f64,
     /// Throttle position [0, 1]. 1.0 = WOT.
     throttle_position: f64,
+    /// Whether the starter motor is currently engaged.
+    starter_engaged: bool,
     // Cycle-average torque tracking
     prev_crank_angle: f64,
     cycle_torque_work: f64,
@@ -536,7 +640,9 @@ impl MultiCylinderEngine {
             integral_error: 0.0,
             dyno_mode: 0,
             dyno_load_torque: 10.0,
+            dyno_target_power: 5000.0,
             throttle_position: 1.0,
+            starter_engaged: false,
             prev_crank_angle: 0.0,
             cycle_torque_work: 0.0,
             cycle_time: 0.0,
@@ -552,9 +658,22 @@ impl MultiCylinderEngine {
             .min(2000.0) as usize;
         let sub_dt = dt / n_steps as f64;
 
-        let mut state = MultiCylinderState::default_for(self.cylinders.len());
+        let n = self.cylinders.len();
+        let mut state = MultiCylinderState::default_for(n);
+        let mut peak_exhaust_pulse = vec![0.0_f64; n];
+        let mut peak_exhaust_gas_temp = vec![300.0_f64; n];
         for _ in 0..n_steps {
             state = self.step_inner(sub_dt);
+            for (i, snap) in state.snapshots.iter().enumerate() {
+                if snap.exhaust_pulse_intensity > peak_exhaust_pulse[i] {
+                    peak_exhaust_pulse[i] = snap.exhaust_pulse_intensity;
+                    peak_exhaust_gas_temp[i] = snap.exhaust_gas_temp;
+                }
+            }
+        }
+        for (i, snap) in state.snapshots.iter_mut().enumerate() {
+            snap.exhaust_pulse_intensity = peak_exhaust_pulse[i];
+            snap.exhaust_gas_temp = peak_exhaust_gas_temp[i];
         }
         state
     }
@@ -593,6 +712,11 @@ impl MultiCylinderEngine {
         self.dyno_load_torque = torque;
     }
 
+    /// Set target power for constant-power mode (W).
+    pub fn set_dyno_target_power(&mut self, power: f64) {
+        self.dyno_target_power = power;
+    }
+
     pub fn set_target_rpm(&mut self, rpm: f64) {
         self.target_omega = rpm * 2.0 * std::f64::consts::PI / 60.0;
         self.integral_error = 0.0;
@@ -606,6 +730,15 @@ impl MultiCylinderEngine {
     /// Get current throttle position [0, 1].
     pub fn throttle(&self) -> f64 {
         self.throttle_position
+    }
+
+    /// Engage the starter motor.
+    pub fn start(&mut self) {
+        self.starter_engaged = true;
+        if self.omega < 5.0 {
+            self.omega = 50.0 * 2.0 * std::f64::consts::PI / 60.0;
+        }
+        self.integral_error = 0.0;
     }
 }
 
@@ -643,7 +776,11 @@ impl MultiCylinderEngine {
 
         // Shared torques
         let tau_bearing = friction::bearing_friction_torque(self.omega);
-        let tau_starter = starter_torque(self.omega, self.throttle_position);
+        let tau_starter = starter_torque(self.omega, self.starter_engaged);
+        // Auto-disengage starter once engine catches
+        if self.starter_engaged && self.omega > 300.0 * 2.0 * PI / 60.0 {
+            self.starter_engaged = false;
+        }
         let tau_load = if self.dyno_enabled {
             match self.dyno_mode {
                 0 | 2 => {
@@ -658,6 +795,15 @@ impl MultiCylinderEngine {
                     -self.config.idle_load_torque - 0.05 * self.omega
                 }
                 1 => -self.dyno_load_torque,
+                3 => {
+                    // Constant-power mode: τ = P / ω (hyperbolic load curve)
+                    let min_omega = 50.0 * 2.0 * PI / 60.0;
+                    if self.omega > min_omega {
+                        -self.dyno_target_power / self.omega
+                    } else {
+                        -self.dyno_target_power / min_omega
+                    }
+                }
                 _ => 0.0,
             }
         } else if self.omega > 0.0 {
@@ -890,8 +1036,8 @@ mod tests {
         assert_eq!(state.stroke_phase, 3, "Should be in exhaust stroke");
         let diff = (state.cylinder_pressure - 101_325.0).abs();
         assert!(
-            diff < 1000.0,
-            "Exhaust pressure should be near ambient, got {} Pa (diff {})",
+            diff < 50_000.0,
+            "Exhaust pressure should decay toward ambient, got {} Pa (diff {})",
             state.cylinder_pressure, diff,
         );
     }
@@ -994,6 +1140,32 @@ mod tests {
             assert_eq!(state.cylinder_count, 4);
         }
         assert!(engine.rpm() > 100.0, "I4 stalled, RPM = {}", engine.rpm());
+    }
+
+    #[test]
+    fn blowdown_captures_elevated_pressure() {
+        let mut engine = default_engine();
+        // Advance past power stroke into early exhaust
+        let state = advance_to_deg(&mut engine, 545.0);
+        assert_eq!(state.stroke_phase, 3, "Should be in exhaust stroke");
+        // Pressure should still be above ambient due to blowdown decay
+        assert!(
+            state.cylinder_pressure > 101_325.0,
+            "Early exhaust pressure should be above ambient (blowdown), got {} Pa",
+            state.cylinder_pressure,
+        );
+    }
+
+    #[test]
+    fn exhaust_pulse_intensity_nonzero() {
+        let mut engine = default_engine();
+        // Run through a full cycle to get to exhaust stroke
+        let states = run_full_cycle(&mut engine);
+        let has_pulse = states.iter().any(|s| s.exhaust_pulse_intensity > 0.0);
+        assert!(
+            has_pulse,
+            "exhaust_pulse_intensity should be > 0 during exhaust stroke in at least one sample",
+        );
     }
 
     #[test]
