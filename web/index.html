@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Strepitus — Engine Simulation</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        background: #0a0a0a;
+        color: #e0e0e0;
+        font-family: "JetBrains Mono", "Fira Code", monospace;
+        overflow: hidden;
+      }
+
+      #app {
+        width: 100vw;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+
+      #main-content {
+        flex: 1;
+        display: flex;
+        min-height: 0;
+      }
+
+      #status {
+        padding: 12px 16px;
+        font-size: 13px;
+        color: #666;
+        border-bottom: 1px solid #1a1a1a;
+      }
+
+      #status.ready {
+        color: #4ade80;
+      }
+
+      #status.error {
+        color: #f87171;
+      }
+
+      /* ── Parameter Panel (Phase 7) — overlays engine canvas ── */
+      #param-panel {
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        width: 300px;
+        z-index: 10;
+        background: rgba(13, 13, 13, 0.95);
+        border-right: 1px solid #1a1a1a;
+        display: flex;
+        flex-direction: column;
+        overflow-y: auto;
+        overflow-x: hidden;
+        font-size: 11px;
+      }
+
+      #param-panel.hidden {
+        display: none;
+      }
+
+      #param-panel .panel-header {
+        padding: 10px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #4ade80;
+        border-bottom: 1px solid #1a1a1a;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      #param-panel .preset-row {
+        padding: 8px 12px;
+        border-bottom: 1px solid #1a1a1a;
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      #param-panel .preset-row select {
+        flex: 1;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 4px;
+        color: #fff;
+        font-family: inherit;
+        font-size: 11px;
+        padding: 4px 6px;
+      }
+
+      #param-panel .preset-row button {
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 4px;
+        color: #ccc;
+        font-family: inherit;
+        font-size: 10px;
+        padding: 4px 8px;
+        cursor: pointer;
+      }
+
+      #param-panel .preset-row button:hover {
+        background: #222;
+        border-color: #4ade80;
+        color: #fff;
+      }
+
+      #param-panel .param-group {
+        border-bottom: 1px solid #1a1a1a;
+      }
+
+      #param-panel .group-title {
+        padding: 6px 12px;
+        font-size: 10px;
+        font-weight: 600;
+        color: #666;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        background: #111;
+      }
+
+      #param-panel .param-row {
+        padding: 3px 12px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      #param-panel .param-row label {
+        flex: 1;
+        color: #888;
+        font-size: 10px;
+        min-width: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      #param-panel .param-row input[type="range"] {
+        width: 80px;
+        accent-color: #4ade80;
+      }
+
+      #param-panel .param-row .param-value {
+        width: 56px;
+        text-align: right;
+        color: #fff;
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* ── Canvas Container ── */
+      #canvas-container {
+        flex: 1;
+        position: relative;
+        min-width: 0;
+      }
+
+      #charts-panel {
+        width: 40%;
+        min-width: 240px;
+        max-width: 560px;
+        flex-shrink: 1;
+        background: #0a0a0a;
+        border-left: 1px solid #1a1a1a;
+        display: flex;
+        flex-direction: column;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
+
+      #charts-panel.hidden {
+        display: none;
+      }
+
+      #charts-panel .health-indicator {
+        padding: 8px 12px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        border-bottom: 1px solid #1a1a1a;
+      }
+
+      #charts-panel .health-indicator.ok {
+        color: #4ade80;
+      }
+
+      #charts-panel .health-indicator.warn {
+        color: #facc15;
+      }
+
+      #charts-panel .health-indicator.critical {
+        color: #f87171;
+      }
+
+      .chart-row {
+        border-bottom: 1px solid #1a1a1a;
+        padding: 2px 0;
+      }
+
+      .chart-area {
+        position: relative;
+      }
+
+      .chart-header {
+        display: flex;
+        justify-content: space-between;
+        padding: 3px 10px 1px;
+        font-size: 12px;
+      }
+
+      .chart-header .chart-label-group {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      .chart-header .chart-label {
+        color: #888;
+      }
+
+      .chart-info-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 13px;
+        height: 13px;
+        border-radius: 50%;
+        background: #222;
+        color: #666;
+        font-size: 8px;
+        cursor: pointer;
+        flex-shrink: 0;
+        border: 1px solid #333;
+      }
+
+      .chart-info-btn:hover {
+        background: #333;
+        color: #fff;
+        border-color: #4ade80;
+      }
+
+      .chart-tooltip {
+        padding: 3px 10px 4px;
+        font-size: 9px;
+        color: #999;
+        line-height: 1.4;
+        background: #111;
+      }
+
+      .chart-header .chart-value {
+        color: #fff;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #engine-canvas {
+        width: 100%;
+        height: 100%;
+      }
+
+      #telemetry {
+        position: absolute;
+        top: 12px;
+        right: 12px;
+        background: rgba(0, 0, 0, 0.8);
+        border: 1px solid #333;
+        border-radius: 6px;
+        padding: 12px 16px;
+        font-size: 12px;
+        line-height: 1.8;
+        min-width: 240px;
+      }
+
+      #telemetry .label {
+        color: #888;
+      }
+
+      #telemetry .value {
+        color: #fff;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #controls {
+        position: absolute;
+        bottom: 12px;
+        left: 12px;
+        background: rgba(0, 0, 0, 0.8);
+        border: 1px solid #333;
+        border-radius: 6px;
+        padding: 12px 16px;
+        font-size: 12px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      #controls label {
+        color: #888;
+      }
+
+      #rpm-input,
+      #dyno-gain {
+        width: 70px;
+        background: #1a1a1a;
+        border: 1px solid #444;
+        border-radius: 4px;
+        color: #fff;
+        font-family: inherit;
+        font-size: 13px;
+        padding: 4px 8px;
+        text-align: right;
+      }
+
+      #rpm-input:focus,
+      #dyno-gain:focus {
+        outline: none;
+        border-color: #4ade80;
+      }
+
+      #dyno-toggle {
+        accent-color: #4ade80;
+      }
+
+      #volume-slider {
+        width: 60px;
+        accent-color: #60a5fa;
+      }
+
+      #time-scale {
+        width: 60px;
+        accent-color: #c084fc;
+      }
+
+      #time-scale-value {
+        color: #c084fc;
+        font-variant-numeric: tabular-nums;
+        min-width: 30px;
+      }
+
+      /* ── Audio Mixer Panel ── */
+      #audio-mixer {
+        position: absolute;
+        bottom: 60px;
+        right: 12px;
+        z-index: 10;
+        width: 250px;
+        background: rgba(13, 13, 13, 0.95);
+        border: 1px solid #1a1a1a;
+        border-radius: 6px;
+        font-size: 11px;
+      }
+
+      #audio-mixer.hidden {
+        display: none;
+      }
+
+      #audio-mixer .mixer-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 10px;
+        border-bottom: 1px solid #1a1a1a;
+      }
+
+      #audio-mixer .mixer-title {
+        color: #60a5fa;
+        font-weight: 600;
+        font-size: 12px;
+      }
+
+      #audio-mixer .mixer-close {
+        background: none;
+        border: none;
+        color: #666;
+        cursor: pointer;
+        font-size: 14px;
+        padding: 0 2px;
+      }
+
+      #audio-mixer .mixer-close:hover {
+        color: #fff;
+      }
+
+      #audio-mixer .mixer-master {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        border-bottom: 1px solid #1a1a1a;
+      }
+
+      #audio-mixer .mixer-mute-btn {
+        background: none;
+        border: none;
+        cursor: pointer;
+        font-size: 14px;
+        padding: 0;
+      }
+
+      #audio-mixer .mixer-master label {
+        color: #888;
+        font-size: 10px;
+      }
+
+      #audio-mixer .mixer-master-vol {
+        flex: 1;
+        accent-color: #60a5fa;
+      }
+
+      #audio-mixer .mixer-channels {
+        padding: 4px 0;
+      }
+
+      #audio-mixer .mixer-channel-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+      }
+
+      #audio-mixer .mixer-channel-row input[type="checkbox"] {
+        accent-color: #4ade80;
+        width: 13px;
+        height: 13px;
+        flex-shrink: 0;
+      }
+
+      #audio-mixer .mixer-channel-label {
+        width: 80px;
+        font-size: 10px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      #audio-mixer .mixer-channel-vol {
+        flex: 1;
+        accent-color: #4ade80;
+      }
+
+      #controls .hint {
+        color: #555;
+        font-size: 11px;
+      }
+
+      /* ── P-V Diagram (inside charts panel) ── */
+      #pv-section {
+        border-bottom: 1px solid #1a1a1a;
+      }
+
+      #pv-section .pv-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 6px 10px 2px;
+        font-size: 12px;
+      }
+
+      #pv-section .pv-header .chart-label-group {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      #pv-section .pv-header .chart-label {
+        color: #888;
+      }
+
+      #pv-section .pv-tooltip {
+        padding: 4px 10px 6px;
+        font-size: 9px;
+        color: #999;
+        line-height: 1.4;
+        background: #111;
+      }
+
+      #pv-canvas {
+        width: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="status">Loading WASM module...</div>
+      <div id="main-content">
+        <div id="canvas-container">
+          <div id="param-panel" class="hidden"></div>
+          <div id="audio-mixer" class="hidden"></div>
+          <canvas id="engine-canvas"></canvas>
+          <div id="telemetry"></div>
+          <div id="controls">
+            <label for="rpm-input">Target RPM</label>
+            <input id="rpm-input" type="number" min="0" max="8000" step="10" value="800" />
+            <label>Throttle</label>
+            <input id="throttle-slider" type="range" min="0" max="100" value="100" style="width:70px;accent-color:#f59e0b" />
+            <span id="throttle-value" style="color:#f59e0b;font-variant-numeric:tabular-nums;min-width:30px">100%</span>
+            <label><input type="checkbox" id="dyno-toggle" checked /> Dyno</label>
+            <label for="dyno-gain">K</label>
+            <input id="dyno-gain" type="number" min="0.1" max="10" step="0.1" value="1.0" />
+            <select id="dyno-mode" style="background:#1a1a1a;border:1px solid #444;border-radius:4px;color:#fff;font-family:inherit;font-size:11px;padding:4px 6px">
+              <option value="0">Speed</option>
+              <option value="1">Load</option>
+            </select>
+            <span id="dyno-load-group" style="display:none">
+              <label for="dyno-load">Load</label>
+              <input id="dyno-load" type="number" min="0" max="100" step="1" value="10" style="width:50px;background:#1a1a1a;border:1px solid #444;border-radius:4px;color:#fff;font-family:inherit;font-size:13px;padding:4px 6px;text-align:right" />
+              <span style="color:#888;font-size:11px">N·m</span>
+            </span>
+            <button id="sweep-btn" style="background:#1a1a1a;border:1px solid #444;border-radius:4px;color:#c084fc;font-family:inherit;font-size:11px;padding:4px 8px;cursor:pointer">Sweep</button>
+            <label>Vol</label>
+            <input id="volume-slider" type="range" min="0" max="100" value="30" />
+            <button id="mute-btn" title="Mute (M)">🔊</button>
+            <label>Speed</label>
+            <input id="time-scale" type="range" min="0.1" max="2" step="0.1" value="1.0" />
+            <span id="time-scale-value">1.0x</span>
+            <span class="hint">Space W/S:throttle D G F V P A M [ ]</span>
+          </div>
+        </div>
+        <div id="charts-panel">
+          <div id="pv-section">
+            <div class="pv-header">
+              <span class="chart-label-group">
+                <span class="chart-label">P-V Diagram</span>
+                <span class="chart-info-btn" id="pv-info-btn" title="Pressure-Volume diagram showing a complete Otto cycle">?</span>
+                <span class="chart-info-btn" id="pv-log-btn" title="Toggle log/linear pressure scale (L)">L</span>
+              </span>
+            </div>
+            <div class="pv-tooltip" id="pv-tooltip" style="display: none;">
+              Pressure vs. Volume for one complete 4-stroke cycle. The enclosed area represents net work output.
+              Blue = Intake (piston draws in air-fuel mix), Green = Compression (piston compresses the charge),
+              Red = Power (combustion expands gas, doing work), Orange = Exhaust (spent gas expelled).
+              A taller, wider loop means more work per cycle.
+            </div>
+            <canvas id="pv-canvas" width="560" height="320"></canvas>
+          </div>
+          <div id="dyno-chart-section" style="display:none;border-bottom:1px solid #1a1a1a">
+            <div style="padding:6px 10px 2px;font-size:12px;color:#888">Dyno Curve</div>
+            <canvas id="dyno-chart-canvas" width="560" height="280"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

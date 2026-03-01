@@ -1,0 +1,28 @@
+# Strepitus — Claude Code Guidelines
+
+## Environment
+
+Always prepend to PATH before running Rust or bun commands:
+
+```bash
+export PATH="/c/Users/mrmar/.cargo/bin:/c/Users/mrmar/.bun/bin:$PATH"
+```
+
+## Conventions
+
+- **Package manager:** bun (never npm/yarn)
+- **README charts:** Use Mermaid diagrams, prefer horizontal (LR) layout
+- **Tests:** `cargo test` from `crates/strepitus-core/`
+- **WASM build:** `wasm-pack build --target web --out-dir ../../web/src/wasm` from `crates/strepitus-core/`
+- **Frontend build:** `bun run build` from `web/`
+- **Dev server:** `bun run dev` from `web/`
+
+## Playwright Testing
+
+- **Always pause before screenshotting:** When using the Playwright MCP to test the app, always wait (e.g. `browser_wait_for` with a short delay) before taking a screenshot. This ensures animations and async rendering have settled.
+
+## Build & Deploy Checklist
+
+1. `cargo test` from `crates/strepitus-core/` — all tests pass
+2. `wasm-pack build --target web --out-dir ../../web/src/wasm` from `crates/strepitus-core/`
+3. `bun run build` from `web/` — TypeScript + Vite build succeeds
