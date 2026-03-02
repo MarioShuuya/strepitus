@@ -43,8 +43,9 @@ async function main() {
     let bore = config.bore;
     let stroke = config.stroke;
     let cylinderCount = (configJson.cylinder_count as number) || 1;
-    let singleEngine: InstanceType<typeof wasm.Engine> | null = null;
-    let multiEngine: InstanceType<typeof wasm.MultiCylinderEngine> | null = null;
+
+    // Unified engine — works for any cylinder count
+    let engine: InstanceType<typeof wasm.Engine>;
 
     function createEngine() {
       // Always recreate config from JSON (engine takes ownership)
@@ -52,67 +53,20 @@ async function main() {
       bore = freshConfig.bore;
       stroke = freshConfig.stroke;
       cylinderCount = (configJson.cylinder_count as number) || 1;
-      if (cylinderCount > 1) {
-        singleEngine = null;
-        multiEngine = new wasm.MultiCylinderEngine(freshConfig);
-      } else {
-        multiEngine = null;
-        singleEngine = new wasm.Engine(freshConfig);
-      }
+      engine = new wasm.Engine(freshConfig);
     }
     createEngine();
 
-    function setRpm(rpm: number) {
-      if (singleEngine) singleEngine.set_rpm(rpm);
-      if (multiEngine) multiEngine.set_rpm(rpm);
-    }
-    function setDynoEnabled(v: boolean) {
-      if (singleEngine) singleEngine.set_dyno_enabled(v);
-      if (multiEngine) multiEngine.set_dyno_enabled(v);
-    }
-    function setDynoGain(v: number) {
-      if (singleEngine) singleEngine.set_dyno_gain(v);
-      if (multiEngine) multiEngine.set_dyno_gain(v);
-    }
-    function setDynoIntegralGain(v: number) {
-      if (singleEngine) singleEngine.set_dyno_integral_gain(v);
-      if (multiEngine) multiEngine.set_dyno_integral_gain(v);
-    }
-    function setDynoMode(v: number) {
-      if (singleEngine) singleEngine.set_dyno_mode(v);
-      if (multiEngine) multiEngine.set_dyno_mode(v);
-    }
-    function setDynoLoad(v: number) {
-      if (singleEngine) singleEngine.set_dyno_load(v);
-      if (multiEngine) multiEngine.set_dyno_load(v);
-    }
-    function setDynoTargetPower(kw: number) {
-      const watts = kw * 1000;
-      if (singleEngine) singleEngine.set_dyno_target_power(watts);
-      if (multiEngine) multiEngine.set_dyno_target_power(watts);
-    }
-    function setTargetRpm(rpm: number) {
-      if (singleEngine) singleEngine.set_target_rpm(rpm);
-      if (multiEngine) multiEngine.set_target_rpm(rpm);
-    }
-    function setThrottle(v: number) {
-      if (singleEngine) singleEngine.set_throttle(v);
-      if (multiEngine) multiEngine.set_throttle(v);
-    }
-    function startEngine() {
-      if (singleEngine) singleEngine.start();
-      if (multiEngine) multiEngine.start();
-    }
-    function getThrottle(): number {
-      if (singleEngine) return singleEngine.throttle();
-      if (multiEngine) return multiEngine.throttle();
-      return 1.0;
-    }
-    function getRpm(): number {
-      if (singleEngine) return singleEngine.rpm();
-      if (multiEngine) return multiEngine.rpm();
-      return 0;
-    }
+    function setDynoEnabled(v: boolean) { engine.set_dyno_enabled(v); }
+    function setDynoGain(v: number) { engine.set_dyno_gain(v); }
+    function setDynoIntegralGain(v: number) { engine.set_dyno_integral_gain(v); }
+    function setDynoMode(v: number) { engine.set_dyno_mode(v); }
+    function setDynoLoad(v: number) { engine.set_dyno_load(v); }
+    function setDynoTargetPower(_kw: number) { engine.set_dyno_target_power(0); }
+    function setTargetRpm(rpm: number) { engine.set_rpm_target(rpm); }
+    function setThrottle(v: number) { engine.set_throttle(v); }
+    function getThrottle(): number { return engine.throttle(); }
+    function getRpm(): number { return engine.rpm(); }
 
     // KPI bar handles status display now
 
@@ -186,7 +140,6 @@ async function main() {
       try {
         configJson = newConfig as Record<string, unknown>;
         createEngine();
-        setRpm(controlValues.rpm);
         setDynoEnabled(controlValues.dynoEnabled);
         setDynoGain(controlValues.dynoGain);
         // Recreate view for new bore/stroke/cylinder count/layout
@@ -240,10 +193,6 @@ async function main() {
         case "X":
           exhaustPanel.toggle();
           break;
-        case "e":
-        case "E":
-          startEngine();
-          break;
         case ".":
           if (!running) {
             stepRequested += e.shiftKey ? 10 : 1;
@@ -251,12 +200,6 @@ async function main() {
           break;
       }
     });
-
-    // Start button
-    const startBtn = document.getElementById("start-btn");
-    if (startBtn) {
-      startBtn.addEventListener("click", () => startEngine());
-    }
 
     // Pause button
     const pauseBtn = document.getElementById("pause-btn");
@@ -268,7 +211,7 @@ async function main() {
       controlValues = values;
       running = values.running;
       timeScale = values.timeScale;
-      setRpm(values.rpm);
+      setTargetRpm(values.rpm);
       setDynoEnabled(values.dynoEnabled);
       setDynoGain(values.dynoGain);
       setDynoIntegralGain(values.dynoIntegralGain);
@@ -374,9 +317,9 @@ async function main() {
 
     /** Run one simulation step: physics, view update, telemetry, charts, audio */
     function performSimStep(dt: number, updateAudio: boolean): void {
-      if (singleEngine) {
+      if (cylinderCount <= 1) {
         // Single-cylinder path
-        const state = singleEngine.step(dt);
+        const state = engine.step();
 
         view.update({
           piston_position: state.piston_position,
@@ -462,9 +405,9 @@ async function main() {
 
         // Free WASM object to prevent memory leak
         state.free();
-      } else if (multiEngine) {
+      } else {
         // Multi-cylinder path
-        const mstate = multiEngine.step(dt);
+        const mstate = engine.step_multi();
         const flat = mstate.cylindersFlat() as unknown as Float64Array;
         // ⚠ SYNC: Must match field push order in crates/strepitus-core/src/types.rs cylinders_flat()
         const CYLINDER_FLAT_FIELDS = 15;
