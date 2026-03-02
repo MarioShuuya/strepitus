@@ -11,7 +11,7 @@ export PATH="/c/Users/mrmar/.cargo/bin:/c/Users/mrmar/.bun/bin:$PATH"
 ## Conventions
 
 - **Package manager:** bun (never npm/yarn)
-- **README charts:** Use Mermaid diagrams, prefer horizontal (LR) layout
+- **Charts & diagrams:** Always use Mermaid when possible, prefer horizontal (LR) layout. This applies to README files, research docs, and any other markdown files. Note: Mermaid does not support `\n` inside node labels — use a space or split into multiple nodes instead.
 - **Tests:** `cargo test` from `crates/strepitus-core/`
 - **WASM build:** `wasm-pack build --target web --out-dir ../../web/src/wasm` from `crates/strepitus-core/`
 - **Frontend build:** `bun run build` from `web/`
