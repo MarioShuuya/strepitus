@@ -41,6 +41,8 @@ pub struct Engine {
     config_json: String,
     /// Current target RPM (for dyno mode 0).
     target_rpm: f64,
+    /// Dyno mode saved when dyno is disabled, restored when re-enabled.
+    saved_dyno_mode: u8,
 }
 
 #[wasm_bindgen]
@@ -58,6 +60,7 @@ impl Engine {
             deg_per_tick: 6.0,
             config_json,
             target_rpm: 1000.0,
+            saved_dyno_mode: 0,
         }
     }
 
@@ -71,7 +74,12 @@ impl Engine {
 
     /// Set target RPM (for dyno speed-PI mode).
     pub fn set_rpm_target(&mut self, rpm: f64) {
+        if (rpm - self.target_rpm).abs() > 5.0 {
+            // Reset integrator on significant target change to avoid windup transient
+            self.runtime.dyno_integral = 0.0;
+        }
         self.target_rpm = rpm;
+        self.params.dyno.target_rpm = rpm;
     }
 
     /// Rebuild engine from a new config JSON string.
@@ -243,6 +251,13 @@ impl Engine {
         .to_string()
     }
 
+    /// Set wall-clock dt (seconds). Computes deg_per_tick from dt × omega.
+    pub fn set_dt(&mut self, dt: f64) {
+        let omega = self.runtime.omega.max(10.0);
+        let deg_per_sec = omega.to_degrees();
+        self.deg_per_tick = (dt * deg_per_sec).clamp(1.0, 720.0);
+    }
+
     /// Current RPM.
     pub fn rpm(&self) -> f64 {
         self.runtime.omega * 60.0 / (2.0 * std::f64::consts::PI)
@@ -255,7 +270,12 @@ impl Engine {
 
     /// Set dyno mode: 0=speed PI, 1=constant load, 2=sweep.
     pub fn set_dyno_mode(&mut self, mode: u8) {
-        self.params.dyno.dyno_mode = mode;
+        self.saved_dyno_mode = mode;
+        // Only apply immediately if dyno is active (not in free-rev mode 255)
+        if self.params.dyno.dyno_mode != 255 {
+            self.params.dyno.dyno_mode = mode;
+            self.runtime.dyno_integral = 0.0;
+        }
     }
 
     /// Set constant load torque in N·m (for dyno mode 1).
@@ -278,9 +298,17 @@ impl Engine {
         self.params.dyno.max_rpm = rpm;
     }
 
-    /// No-op: dyno is always enabled — the mode controls its behavior.
-    /// Retained for API compatibility.
-    pub fn set_dyno_enabled(&mut self, _enabled: bool) {}
+    /// Enable or disable external dyno load.
+    /// Disabled = free-rev (accessories-only load); enabled = restore saved dyno mode.
+    pub fn set_dyno_enabled(&mut self, enabled: bool) {
+        if enabled {
+            self.params.dyno.dyno_mode = self.saved_dyno_mode;
+        } else {
+            self.saved_dyno_mode = self.params.dyno.dyno_mode;
+            self.params.dyno.dyno_mode = 255; // free-rev: no external brake
+        }
+        self.runtime.dyno_integral = 0.0;
+    }
 
     /// No-op: target power not directly supported.
     pub fn set_dyno_target_power(&mut self, _watts: f64) {}

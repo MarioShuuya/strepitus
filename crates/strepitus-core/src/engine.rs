@@ -222,7 +222,19 @@ pub fn step_engine(
         } else {
             0.0
         };
-        cyl.combustion.gas_mass = (cyl.combustion.gas_mass + gas_mass_in).max(1e-9);
+        if gas_mass_in > 0.0 {
+            // Mix incoming fresh charge (ambient temp) with residual hot gas.
+            // Without this, hot residual (~800 K) pollutes the charge, cutting
+            // charge density ~40% and starving combustion.
+            let t_fresh = params.intake.ambient_temperature;
+            let m_old = cyl.combustion.gas_mass;
+            let m_total = (m_old + gas_mass_in).max(1e-9);
+            cyl.combustion.temperature =
+                (m_old * cyl.combustion.temperature + gas_mass_in * t_fresh) / m_total;
+            cyl.combustion.gas_mass = m_total;
+        } else {
+            cyl.combustion.gas_mass = cyl.combustion.gas_mass.max(1e-9);
+        }
 
         // During exhaust stroke: remove gas mass
         let gas_mass_out = if valve_out.exhaust_lift > 1e-6 {
@@ -322,15 +334,21 @@ pub fn step_engine(
         let inertia_force = -kin.recip_mass * kin.piston_accel;
         let net_piston_force = gas_force + inertia_force + friction_out.piston_friction_force;
         let tau_gas = net_piston_force * kin.torque_arm;
-        let tau_friction = friction_out.total_friction_torque;
+        // Bearing torque covers the whole crankshaft (all main bearings).
+        // friction::step() is called once per cylinder, so we distribute it
+        // evenly: each call contributes only 1/n of total bearing torque.
+        let tau_friction = friction_out.total_friction_torque
+            + friction_out.bearing_torque * (n - 1) as f64 / n as f64;
         let tau_net = tau_gas + tau_friction;
 
         total_torque += tau_net;
 
-        // Combustion intensity for audio
-        let intensity = (comb_out.burn_fraction - cyl.snapshot.burn_fraction)
-            .max(0.0)
-            .min(1.0);
+        // Combustion intensity for audio: pressure-ratio during power stroke only
+        let intensity = if kin.stroke_phase == 2 {
+            ((comb_out.pressure / 101_325.0 - 1.0) / 40.0).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         if intensity > max_combustion_intensity {
             max_combustion_intensity = intensity;
         }
@@ -415,16 +433,22 @@ fn compute_load_torque(params: &EngineParams, runtime: &mut EngineRuntime, rpm: 
     let d = &params.dyno;
     match d.dyno_mode {
         0 => {
-            // Speed PI: target is controlled externally; for now, idle load + base drag
-            let target_rpm = 1000.0; // idle — JS sets throttle to control speed
-            let err = rpm - target_rpm;
+            // Speed PI: target set from JS via Engine::set_rpm_target()
+            let err = rpm - d.target_rpm;
             runtime.dyno_integral += err;
+            // Anti-windup: clamp integral so its contribution never exceeds the output clamp
+            let integral_limit = 50.0 / d.dyno_integral_gain.max(1e-6);
+            runtime.dyno_integral = runtime.dyno_integral.clamp(-integral_limit, integral_limit);
             let pi = d.dyno_gain * err + d.dyno_integral_gain * runtime.dyno_integral;
             (d.idle_load_torque + pi.clamp(-50.0, 200.0)).max(0.0)
         }
         1 => {
             // Constant load
             d.dyno_load_torque
+        }
+        255 => {
+            // Free-rev / dyno off: only accessories drag (~10% of idle load)
+            d.idle_load_torque * 0.1
         }
         _ => {
             // Sweep (treat as constant for now — JS controls throttle during sweep)

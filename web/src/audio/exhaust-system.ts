@@ -51,6 +51,9 @@ export class ExhaustSystem {
   // Output
   private outputGain: GainNode;
 
+  // Edge detection — one impulse per blowdown event per cylinder
+  private prevExhaustPulsePerCyl: number[] = [];
+
   // Cached
   private baseFreq = 214;
 
@@ -215,7 +218,7 @@ export class ExhaustSystem {
       switch (cfg.muffler.type) {
         case "chambered": {
           // Lower base freq for large volumes, peaking resonance for "boxy" sound
-          const freq = Math.max(800, 1200 / Math.sqrt(Math.max(cfg.muffler.volume, 0.5)));
+          const freq = Math.max(1000, 2000 / Math.sqrt(Math.max(cfg.muffler.volume, 0.5)));
           for (let i = 0; i < 2; i++) {
             const f = ctx.createBiquadFilter();
             f.type = "lowpass";
@@ -399,19 +402,24 @@ export class ExhaustSystem {
     const t = this.ctx.currentTime;
     const n = cylinders.length;
 
-    const threshold = 0.02;
+    const threshold = 0.05;
+
+    // Resize edge-detection array to match cylinder count
+    while (this.prevExhaustPulsePerCyl.length < n) this.prevExhaustPulsePerCyl.push(0);
 
     // Reduced oscillator weights (noise-dominant)
     const harmWeights = [0.3, 0.4, 0.15];
 
     for (let c = 0; c < n; c++) {
       const intensity = cylinders[c].exhaust_pulse_intensity;
-      const firing = intensity > threshold;
+      const prev = this.prevExhaustPulsePerCyl[c] ?? 0;
+      const rising = intensity > threshold && prev <= threshold;
+      this.prevExhaustPulsePerCyl[c] = intensity;
 
-      if (firing) {
+      if (rising) {
         // No artificial stagger — trust physics timing
         const fireT = t;
-        const peakGain = intensity * 0.6 / Math.sqrt(n) * channelVolume;
+        const peakGain = intensity * 1.4 / Math.sqrt(n) * channelVolume;
 
         // Multi-stage envelope
         const preAttack = 0.0002;  // 0.2ms → 30%

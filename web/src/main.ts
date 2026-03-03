@@ -15,6 +15,7 @@ import { ExhaustPanel } from "./ui/exhaust-panel";
 import { DynoSweep } from "./dyno/sweep";
 import { DynoChart } from "./ui/dyno-chart";
 import { LegendPanel } from "./ui/legend-panel";
+import { AudioScopePanel } from "./ui/audio-scope";
 
 // Status is now shown via KPI bar badge — setStatus is a no-op for legacy calls
 function setStatus(_msg: string, _state: "loading" | "ready" | "error") {
@@ -113,6 +114,9 @@ async function main() {
     // 7. Legend panel
     const legendPanel = new LegendPanel("legend-panel");
 
+    // 7b. Audio scope panel
+    const audioScope = new AudioScopePanel("audio-scope", synth);
+
     function wireLegendHover() {
       // Legend hover → highlight 3D part
       legendPanel.setPartHoverCallback((partName) => {
@@ -140,8 +144,14 @@ async function main() {
       try {
         configJson = newConfig as Record<string, unknown>;
         createEngine();
+        // Re-apply all control state to the freshly-created engine
         setDynoEnabled(controlValues.dynoEnabled);
         setDynoGain(controlValues.dynoGain);
+        setDynoIntegralGain(controlValues.dynoIntegralGain);
+        setDynoMode(controlValues.dynoMode);
+        setDynoLoad(controlValues.dynoLoadTorque);
+        setTargetRpm(controlValues.rpm);
+        setThrottle(controlValues.throttle);
         // Recreate view for new bore/stroke/cylinder count/layout
         view.dispose();
         const newLayoutType = (configJson.layout_type as LayoutType) || "inline";
@@ -192,6 +202,10 @@ async function main() {
         case "x":
         case "X":
           exhaustPanel.toggle();
+          break;
+        case "o":
+        case "O":
+          audioScope.toggle();
           break;
         case ".":
           if (!running) {
@@ -268,6 +282,10 @@ async function main() {
     // 10. Power EMA + Dyno sweep
     let smoothedTorque = 0;
     const torqueAlpha = 0.02;
+
+    // Acoustic signal trackers — per-cylinder arrays, reset on engine rebuild
+    let acousticPrevIntakeLift: number[] = [];
+    let acousticPrevExhaustLift: number[] = [];
     let activeSweep: DynoSweep | null = null;
     const dynoChart = new DynoChart("dyno-chart-canvas");
     const dynoChartSection = document.getElementById("dyno-chart-section");
@@ -317,6 +335,7 @@ async function main() {
 
     /** Run one simulation step: physics, view update, telemetry, charts, audio */
     function performSimStep(dt: number, updateAudio: boolean): void {
+      engine.set_dt(dt);
       if (cylinderCount <= 1) {
         // Single-cylinder path
         const state = engine.step();
@@ -381,10 +400,42 @@ async function main() {
         pvDiagram.render();
 
         if (updateAudio) {
+          // Grow acoustic trackers for single-cylinder path
+          if (acousticPrevIntakeLift.length < 1) acousticPrevIntakeLift.push(0);
+          if (acousticPrevExhaustLift.length < 1) acousticPrevExhaustLift.push(0);
+
+          // Piston side force from conrod geometry (β = arcsin(λ·sin(θ)))
+          const conRod = (configJson.con_rod_length as number) || 0.143;
+          const lambda = (stroke / 2) / conRod;
+          const clampedSin = Math.max(-1, Math.min(1, lambda * Math.sin(state.crank_angle)));
+          const beta = Math.asin(clampedSin);
+          const pistonSideForceN = Math.abs(state.gas_force * Math.tan(beta));
+          const pistonSideNorm = Math.min(1, pistonSideForceN / 5000);
+
+          // Valve closing speeds (seat impact)
+          const safeDt = dt > 0 ? dt : 0.001;
+          const intakeClosingSpeed = Math.max(0, acousticPrevIntakeLift[0] - state.intake_valve_lift) / safeDt;
+          const exhaustClosingSpeed = Math.max(0, acousticPrevExhaustLift[0] - state.exhaust_valve_lift) / safeDt;
+          acousticPrevIntakeLift[0] = state.intake_valve_lift;
+          acousticPrevExhaustLift[0] = state.exhaust_valve_lift;
+
+          // Intake induction pulse: lift × vacuum fraction
+          const vacuumFrac = Math.max(0, 1 - state.manifold_pressure / 101_325);
+          const intakePulse = Math.min(1, state.intake_valve_lift * vacuumFrac * 200);
+
+          // Bearing noise: RPM-scaled
+          const bearingNoise = Math.min(1, state.rpm / 8000) * 0.4;
+
+          const runnerLengthM = ((configJson.runner_length_mm as number) || 300) / 1000;
+          const filterType = (configJson.intake_filter_type as number) || 0;
+
           synth.update({
             mechanical_noise: state.mechanical_noise,
             cycle_frequency: state.cycle_frequency,
             rpm: state.rpm,
+            bearing_noise: bearingNoise,
+            runner_length_m: runnerLengthM,
+            filter_type: filterType,
             cylinders: [{
               combustion_intensity: state.combustion_intensity,
               stroke_phase: state.stroke_phase,
@@ -394,6 +445,10 @@ async function main() {
               cylinder_pressure: state.cylinder_pressure,
               exhaust_pulse_intensity: state.exhaust_pulse_intensity,
               exhaust_gas_temp: state.exhaust_gas_temp,
+              piston_side_force: pistonSideNorm,
+              intake_closing_speed: intakeClosingSpeed,
+              exhaust_closing_speed: exhaustClosingSpeed,
+              intake_pulse: intakePulse,
             }],
           });
         }
@@ -483,20 +538,58 @@ async function main() {
         }
 
         if (updateAudio) {
+          // Grow acoustic trackers for multi-cylinder path
+          while (acousticPrevIntakeLift.length < nCyl) acousticPrevIntakeLift.push(0);
+          if (acousticPrevIntakeLift.length > nCyl) acousticPrevIntakeLift.length = nCyl;
+          while (acousticPrevExhaustLift.length < nCyl) acousticPrevExhaustLift.push(0);
+          if (acousticPrevExhaustLift.length > nCyl) acousticPrevExhaustLift.length = nCyl;
+
+          const conRod = (configJson.con_rod_length as number) || 0.143;
+          const lambda = (stroke / 2) / conRod;
+          const safeDt = dt > 0 ? dt : 0.001;
+          const runnerLengthM = ((configJson.runner_length_mm as number) || 300) / 1000;
+          const filterType = (configJson.intake_filter_type as number) || 0;
+          const bearingNoise = Math.min(1, mstate.rpm / 8000) * 0.4;
+
           synth.update({
             mechanical_noise: mstate.mechanical_noise,
             cycle_frequency: mstate.cycle_frequency,
             rpm: mstate.rpm,
-            cylinders: cylinders.map((cyl) => ({
-              combustion_intensity: cylinderCombustion(cyl.cylinder_pressure, cyl.stroke_phase),
-              stroke_phase: cyl.stroke_phase,
-              intake_valve_lift: cyl.intake_valve_lift,
-              exhaust_valve_lift: cyl.exhaust_valve_lift,
-              burn_fraction: cyl.burn_fraction,
-              cylinder_pressure: cyl.cylinder_pressure,
-              exhaust_pulse_intensity: cyl.exhaust_pulse_intensity,
-              exhaust_gas_temp: cyl.exhaust_gas_temp,
-            })),
+            bearing_noise: bearingNoise,
+            runner_length_m: runnerLengthM,
+            filter_type: filterType,
+            cylinders: cylinders.map((cyl, ci) => {
+              // Piston side force
+              const clampedSin = Math.max(-1, Math.min(1, lambda * Math.sin(cyl.crank_angle)));
+              const beta = Math.asin(clampedSin);
+              const pistonSideForceN = Math.abs(cyl.gas_force * Math.tan(beta));
+              const pistonSideNorm = Math.min(1, pistonSideForceN / 5000);
+
+              // Valve closing speeds
+              const intakeClosingSpeed = Math.max(0, acousticPrevIntakeLift[ci] - cyl.intake_valve_lift) / safeDt;
+              const exhaustClosingSpeed = Math.max(0, acousticPrevExhaustLift[ci] - cyl.exhaust_valve_lift) / safeDt;
+              acousticPrevIntakeLift[ci] = cyl.intake_valve_lift;
+              acousticPrevExhaustLift[ci] = cyl.exhaust_valve_lift;
+
+              // Intake induction pulse
+              const vacuumFrac = Math.max(0, 1 - mstate.manifold_pressure / 101_325);
+              const intakePulse = Math.min(1, cyl.intake_valve_lift * vacuumFrac * 200);
+
+              return {
+                combustion_intensity: cylinderCombustion(cyl.cylinder_pressure, cyl.stroke_phase),
+                stroke_phase: cyl.stroke_phase,
+                intake_valve_lift: cyl.intake_valve_lift,
+                exhaust_valve_lift: cyl.exhaust_valve_lift,
+                burn_fraction: cyl.burn_fraction,
+                cylinder_pressure: cyl.cylinder_pressure,
+                exhaust_pulse_intensity: cyl.exhaust_pulse_intensity,
+                exhaust_gas_temp: cyl.exhaust_gas_temp,
+                piston_side_force: pistonSideNorm,
+                intake_closing_speed: intakeClosingSpeed,
+                exhaust_closing_speed: exhaustClosingSpeed,
+                intake_pulse: intakePulse,
+              };
+            }),
           });
         }
 

@@ -34,5 +34,7 @@
   "cylinder_count": 4,
   "crank_offsets_deg": [0, 180, 540, 360],
   "layout_type": "boxer",
-  "layout_v_angle": 180
+  "layout_v_angle": 180,
+  "runner_length_mm": 250.0,
+  "intake_filter_type": 1
 }

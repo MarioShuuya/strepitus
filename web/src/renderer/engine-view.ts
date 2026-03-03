@@ -598,49 +598,56 @@ export class EngineView {
     const boreS = this.bore * this.scale;
     const strokeS = this.stroke * this.scale;
     const baseSize = 0.3 * this.scale;
-    // Extra width for exhaust system extending rightward
-    const exhaustExtra = boreS * 0.6;
-    if (this.cylinderCount <= 1) return baseSize + exhaustExtra;
+    // Exhaust extends below — account for vertical extent
+    const exhaustBottom = -strokeS * 1.4 - boreS * 0.15;
+    const padding = boreS * 0.3;
+
+    if (this.cylinderCount <= 1) {
+      const engineTop = strokeS + boreS * 0.9;
+      const verticalHalf = (engineTop - exhaustBottom) / 2 + padding;
+      return Math.max(verticalHalf, baseSize);
+    }
 
     if (this.layoutType === "boxer") {
       const pairs = Math.ceil(this.cylinderCount / 2);
       const cylLength = strokeS * 1.5 + boreS;
-      const horizontalHalf = cylLength + boreS * 0.5 + exhaustExtra;
+      const horizontalHalf = cylLength + boreS * 0.5;
       const verticalHalf = pairs * boreS * 1.3 / 2 + boreS;
-      return Math.max(horizontalHalf, verticalHalf, baseSize);
+      const exhaustVertHalf = (verticalHalf - exhaustBottom) / 2 + padding;
+      return Math.max(horizontalHalf, exhaustVertHalf, baseSize);
     } else if (this.layoutType === "v") {
       const halfCount = Math.ceil(this.cylinderCount / 2);
       const spacing = boreS * 1.3;
-      const horizontalHalf = (halfCount - 1) * spacing / 2 + boreS * 1.5 + exhaustExtra;
+      const horizontalHalf = (halfCount - 1) * spacing / 2 + boreS * 1.5;
       const angleRad = (this.vAngle / 2) * Math.PI / 180;
       const cylHeight = strokeS * 1.5;
-      const verticalHalf = Math.cos(angleRad) * cylHeight + Math.sin(angleRad) * boreS + boreS;
+      const engineTop = Math.cos(angleRad) * cylHeight + Math.sin(angleRad) * boreS + boreS * 0.5;
+      const verticalHalf = (engineTop - exhaustBottom) / 2 + padding;
       return Math.max(horizontalHalf, verticalHalf, baseSize);
     } else {
-      const horizontalHalf = (this.cylinderCount - 1) * boreS * 1.3 / 2 + boreS + exhaustExtra;
-      const verticalHalf = strokeS * 1.2 + boreS;
+      const horizontalHalf = (this.cylinderCount - 1) * boreS * 1.3 / 2 + boreS;
+      const engineTop = strokeS + boreS * 0.9;
+      const verticalHalf = (engineTop - exhaustBottom) / 2 + padding;
       return Math.max(horizontalHalf, verticalHalf, baseSize);
     }
   }
 
-  /** Compute the vertical center of the engine geometry */
+  /** Compute the vertical center of the engine geometry (includes exhaust below) */
   private computeCenterY(): number {
     const strokeS = this.stroke * this.scale;
     const boreS = this.bore * this.scale;
+    const exhaustBottom = -strokeS * 1.4 - boreS * 0.15;
 
     if (this.layoutType === "boxer") {
-      // Boxer is roughly symmetric around the crankshaft line (y=0)
       const pairs = Math.ceil(this.cylinderCount / 2);
       const extent = pairs * boreS * 1.3 / 2;
-      return extent * 0.1; // slight upward bias for throttle body
+      return (extent * 0.3 + exhaustBottom) / 2;
     } else if (this.layoutType === "v") {
-      const bottom = -strokeS * 0.5;
       const top = strokeS * 1.2 + boreS * 0.5;
-      return (bottom + top) / 2;
+      return (top + exhaustBottom) / 2;
     } else {
-      const bottom = -strokeS * 0.4;
       const top = strokeS + boreS * 0.9;
-      return (bottom + top) / 2;
+      return (top + exhaustBottom) / 2;
     }
   }
 

@@ -27,5 +27,7 @@
   "coolant_temperature": 358.0,
   "max_rpm": 6000.0,
   "idle_load_torque": 3.5,
-  "dyno_gain": 1.0
+  "dyno_gain": 1.0,
+  "runner_length_mm": 350.0,
+  "intake_filter_type": 0
 }

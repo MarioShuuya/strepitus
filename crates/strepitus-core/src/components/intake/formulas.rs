@@ -4,14 +4,17 @@ const GAMMA: f64 = 1.4;
 const R_AIR: f64 = 287.0;
 
 /// Throttle orifice area for a given throttle plate opening angle.
-/// Simple model: A = π/4 × d² × sin(θ_plate), where θ_plate ∈ [0°, 90°].
+/// Butterfly plate geometry: plate blocks (cos θ) of the bore at angle θ from closed.
+/// Effective flow area = A_bore × (1 − cos θ), θ = position × 90°.
 /// throttle_position ∈ [0, 1] maps to plate angle 0–90°.
 pub fn throttle_area(throttle_diameter: f64, throttle_position: f64) -> f64 {
     let t = throttle_position.clamp(0.0, 1.0);
-    // Full circle at WOT, tiny area at closed (plate never fully seals — 1% leakage)
-    let min_open_fraction = 0.01_f64; // 1% always open (idle air)
-    let open_fraction = min_open_fraction + (1.0 - min_open_fraction) * t;
-    PI / 4.0 * throttle_diameter * throttle_diameter * open_fraction
+    let a_bore = PI / 4.0 * throttle_diameter * throttle_diameter;
+    // 1% leak at fully closed so the engine can idle; (1-cos) for butterfly plate shape
+    let min_open_fraction = 0.01_f64;
+    let theta = t * PI / 2.0; // 0 → 90°
+    let open_fraction = min_open_fraction + (1.0 - min_open_fraction) * (1.0 - theta.cos());
+    a_bore * open_fraction
 }
 
 /// Mass flow through throttle body using Barré de Saint-Venant.

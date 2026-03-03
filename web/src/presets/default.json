@@ -26,5 +26,7 @@
   "ring_friction_coefficient": 0.08,
   "viscous_friction": 50.0,
   "wall_conductivity": 50.0,
-  "coolant_temperature": 363.0
+  "coolant_temperature": 363.0,
+  "runner_length_mm": 300.0,
+  "intake_filter_type": 0
 }

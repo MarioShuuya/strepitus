@@ -10,6 +10,7 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    strictPort: true,
     open: true,
     headers: {
       // Required for SharedArrayBuffer (WASM threads) if needed later
@@ -17,6 +18,7 @@ export default defineConfig({
       "Cross-Origin-Embedder-Policy": "require-corp",
     },
   },
+  base: process.env.GITHUB_PAGES ? "/strepitus/" : "/",
   build: {
     target: "es2022",
     outDir: "dist",

@@ -1,34 +1,50 @@
 /**
  * Procedural engine sound synthesis via Web Audio API.
- * Impulsive combustion pops with noise burst, intake air rush, split mechanical noise,
- * compression whoosh, and valve click detection.
- * Per-cylinder firing detection for multi-cylinder support.
+ *
+ * Per-component acoustic channel model:
+ *   Combustion   — pressure-ratio impulse (from Rust, power stroke only)
+ *   Exhaust      — blowdown pulse → ExhaustSystem (header/collector/muffler chain)
+ *   Intake       — induction pulse → IntakeSystem (runner resonance/plenum/filter chain)
+ *   Valve Train  — valve seat impact impulse (closing_speed threshold)
+ *   Piston       — conrod side force amplitude (piston_side_force)
+ *   Compression  — compression stroke pressure whoosh
+ *   Mechanical   — bearing/structural whine (bearing_noise, RPM-scaled)
  */
 
 import { ExhaustSystem } from "./exhaust-system";
 import { defaultExhaustConfig, type ExhaustSystemConfig } from "./exhaust-config";
+import { IntakeSystem, type CylinderAudioExtended } from "./intake-system";
 
 const ATM = 101325; // atmospheric pressure in Pa
 
 export interface CylinderAudio {
-  combustion_intensity: number; // [0,1]
-  stroke_phase: number;         // 0-3
-  intake_valve_lift: number;    // meters
-  exhaust_valve_lift: number;   // meters
-  burn_fraction: number;        // [0,1]
-  cylinder_pressure: number;    // Pa
+  // ── Existing fields (unchanged) ──
+  combustion_intensity: number;    // [0,1] — pressure-ratio from Rust (power stroke only)
+  stroke_phase: number;            // 0-3
+  intake_valve_lift: number;       // metres
+  exhaust_valve_lift: number;      // metres
+  burn_fraction: number;           // [0,1]
+  cylinder_pressure: number;       // Pa
   exhaust_pulse_intensity: number; // [0,1]
-  exhaust_gas_temp: number;     // K
+  exhaust_gas_temp: number;        // K
+  // ── New physics-derived fields (computed in main.ts) ──
+  piston_side_force: number;       // normalized [0,1] — conrod side load
+  intake_closing_speed: number;    // m/s — intake valve seat impact
+  exhaust_closing_speed: number;   // m/s — exhaust valve seat impact
+  intake_pulse: number;            // [0,1] — induction event magnitude
 }
 
 export interface SynthParams {
-  mechanical_noise: number;
+  mechanical_noise: number;   // kept for backward compat
   cycle_frequency: number;
   rpm: number;
   cylinders: CylinderAudio[];
+  bearing_noise: number;      // [0,1] RPM-scaled bearing whine
+  runner_length_m: number;    // intake runner length in metres
+  filter_type: number;        // 0=stock, 1=sport, 2=open
 }
 
-/** Compute combustion_intensity from raw cylinder snapshot data (mirrors Rust AudioParams::from_state). */
+/** Compute combustion_intensity from raw cylinder snapshot (used in multi-cyl path). */
 export function cylinderCombustion(pressure: number, strokePhase: number): number {
   if (strokePhase !== 2) return 0;
   const ratio = pressure / ATM;
@@ -50,6 +66,7 @@ interface ChannelEntry {
   enabled: boolean;
   volume: number;
   gainNode: GainNode | null;
+  analyser: AnalyserNode | null;
 }
 
 export class EngineSynthesizer {
@@ -61,7 +78,7 @@ export class EngineSynthesizer {
 
   // Combustion: 4 oscillators with envelope-triggered firing
   private combOsc: OscillatorNode[] = [];
-  private combGains: GainNode[] = []; // per-oscillator envelope gains
+  private combGains: GainNode[] = [];
   private combustionBus: GainNode | null = null;
 
   // Combustion noise burst: noise → highpass → gain → combustionBus
@@ -69,37 +86,44 @@ export class EngineSynthesizer {
   private combNoiseFilter: BiquadFilterNode | null = null;
   private combNoiseGain: GainNode | null = null;
 
-  // Intake: noise → bandpass → gain
-  private intakeSource: AudioBufferSourceNode | null = null;
-  private intakeFilter: BiquadFilterNode | null = null;
-  private intakeGain: GainNode | null = null;
+  // Intake system (replaces old broadband intake chain)
+  private intakeSystem: IntakeSystem | null = null;
 
-  // Mechanical: shared noise → two parallel bandpass chains
+  // Mechanical: shared noise → valve train + piston + bearing chains
   private mechSource: AudioBufferSourceNode | null = null;
+
+  // Valve Train: noise → bandpass → valveGain → valveBus
   private valveFilter: BiquadFilterNode | null = null;
   private valveGain: GainNode | null = null;
-  private valveBus: GainNode | null = null; // Bus for valve train + valve clicks
-  private pistonFilter: BiquadFilterNode | null = null;
-  private pistonGain: GainNode | null = null;
+  private valveBus: GainNode | null = null;
 
-  // Compression whoosh: noise → lowpass → gain
-  private compSource: AudioBufferSourceNode | null = null;
-  private compFilter: BiquadFilterNode | null = null;
-  private compGain: GainNode | null = null;
-
-  // Valve click: noise → bandpass(5kHz) → gain
+  // Valve click: noise → bandpass(5kHz) → gain → valveBus
   private valveClickSource: AudioBufferSourceNode | null = null;
   private valveClickFilter: BiquadFilterNode | null = null;
   private valveClickGain: GainNode | null = null;
 
+  // Piston: noise → bandpass → pistonGain → masterGain
+  private pistonFilter: BiquadFilterNode | null = null;
+  private pistonGain: GainNode | null = null;
+
+  // Compression whoosh: noise → lowpass → compGain → masterGain
+  private compSource: AudioBufferSourceNode | null = null;
+  private compFilter: BiquadFilterNode | null = null;
+  private compGain: GainNode | null = null;
+
+  // Mechanical (bearing whine): noise → highpass → bearingGain → bearingBus
+  private bearingSource: AudioBufferSourceNode | null = null;
+  private bearingFilter: BiquadFilterNode | null = null;
+  private bearingGain: GainNode | null = null;
+  private bearingBus: GainNode | null = null;
+
   // Exhaust system
   private exhaustSystem: ExhaustSystem | null = null;
 
-  // Per-cylinder combustion tracking for firing edge detection
+  // Per-cylinder tracking
   private prevCombPerCyl: number[] = [];
-  // Per-cylinder valve lift tracking for click detection
-  private prevIntakeLift: number[] = [];
-  private prevExhaustLift: number[] = [];
+  private prevClickSpeedPerCyl: number[] = [];
+
   private _muted = false;
   private _volume = 0.3;
   private initialized = false;
@@ -120,7 +144,6 @@ export class EngineSynthesizer {
     this.combustionBus.gain.value = 1.0;
     this.combustionBus.connect(this.masterGain);
 
-    // 4 harmonics: sub-bass sine, 2nd sawtooth, 3rd sawtooth, 4th sine
     const types: OscillatorType[] = ["sine", "sawtooth", "sawtooth", "sine"];
     const freqMultipliers = [1, 2, 3, 4];
     const baseFreq = 30;
@@ -159,28 +182,16 @@ export class EngineSynthesizer {
     this.combNoiseSource.connect(this.combNoiseFilter);
     this.combNoiseSource.start();
 
-    // --- Intake air rush chain ---
-    this.intakeFilter = ctx.createBiquadFilter();
-    this.intakeFilter.type = "bandpass";
-    this.intakeFilter.frequency.value = 1000;
-    this.intakeFilter.Q.value = 1.5;
+    // --- Intake system (runner resonance + plenum + air filter) ---
+    this.intakeSystem = new IntakeSystem(ctx, noiseBuffer);
+    this.intakeSystem.getOutput().connect(this.masterGain);
 
-    this.intakeGain = ctx.createGain();
-    this.intakeGain.gain.value = 0;
-    this.intakeFilter.connect(this.intakeGain);
-    this.intakeGain.connect(this.masterGain);
-
-    this.intakeSource = ctx.createBufferSource();
-    this.intakeSource.buffer = noiseBuffer;
-    this.intakeSource.loop = true;
-    this.intakeSource.connect(this.intakeFilter);
-    this.intakeSource.start();
-
-    // --- Mechanical noise: valve train chain ---
+    // --- Valve Train bus ---
     this.valveBus = ctx.createGain();
     this.valveBus.gain.value = 1.0;
     this.valveBus.connect(this.masterGain);
 
+    // Valve train continuous noise
     this.valveFilter = ctx.createBiquadFilter();
     this.valveFilter.type = "bandpass";
     this.valveFilter.frequency.value = 3500;
@@ -191,7 +202,24 @@ export class EngineSynthesizer {
     this.valveFilter.connect(this.valveGain);
     this.valveGain.connect(this.valveBus);
 
-    // --- Mechanical noise: piston/wrist pin chain ---
+    // Valve click (seat impact impulse)
+    this.valveClickFilter = ctx.createBiquadFilter();
+    this.valveClickFilter.type = "bandpass";
+    this.valveClickFilter.frequency.value = 5000;
+    this.valveClickFilter.Q.value = 5;
+
+    this.valveClickGain = ctx.createGain();
+    this.valveClickGain.gain.value = 0;
+    this.valveClickFilter.connect(this.valveClickGain);
+    this.valveClickGain.connect(this.valveBus);
+
+    this.valveClickSource = ctx.createBufferSource();
+    this.valveClickSource.buffer = noiseBuffer;
+    this.valveClickSource.loop = true;
+    this.valveClickSource.connect(this.valveClickFilter);
+    this.valveClickSource.start();
+
+    // --- Piston: conrod side force → bandpass ---
     this.pistonFilter = ctx.createBiquadFilter();
     this.pistonFilter.type = "bandpass";
     this.pistonFilter.frequency.value = 1200;
@@ -202,7 +230,7 @@ export class EngineSynthesizer {
     this.pistonFilter.connect(this.pistonGain);
     this.pistonGain.connect(this.masterGain);
 
-    // Single noise source split to both mechanical filters
+    // Shared mech source feeds valve train + piston filters
     this.mechSource = ctx.createBufferSource();
     this.mechSource.buffer = noiseBuffer;
     this.mechSource.loop = true;
@@ -210,7 +238,7 @@ export class EngineSynthesizer {
     this.mechSource.connect(this.pistonFilter);
     this.mechSource.start();
 
-    // --- Compression whoosh chain ---
+    // --- Compression whoosh ---
     this.compFilter = ctx.createBiquadFilter();
     this.compFilter.type = "lowpass";
     this.compFilter.frequency.value = 300;
@@ -227,22 +255,26 @@ export class EngineSynthesizer {
     this.compSource.connect(this.compFilter);
     this.compSource.start();
 
-    // --- Valve click chain ---
-    this.valveClickFilter = ctx.createBiquadFilter();
-    this.valveClickFilter.type = "bandpass";
-    this.valveClickFilter.frequency.value = 5000;
-    this.valveClickFilter.Q.value = 5;
+    // --- Mechanical (bearing whine): highpass noise, RPM-scaled ---
+    this.bearingBus = ctx.createGain();
+    this.bearingBus.gain.value = 1.0;
+    this.bearingBus.connect(this.masterGain);
 
-    this.valveClickGain = ctx.createGain();
-    this.valveClickGain.gain.value = 0;
-    this.valveClickFilter.connect(this.valveClickGain);
-    this.valveClickGain.connect(this.valveBus!); // Route through valve train bus
+    this.bearingFilter = ctx.createBiquadFilter();
+    this.bearingFilter.type = "highpass";
+    this.bearingFilter.frequency.value = 4000;
+    this.bearingFilter.Q.value = 0.7;
 
-    this.valveClickSource = ctx.createBufferSource();
-    this.valveClickSource.buffer = noiseBuffer;
-    this.valveClickSource.loop = true;
-    this.valveClickSource.connect(this.valveClickFilter);
-    this.valveClickSource.start();
+    this.bearingGain = ctx.createGain();
+    this.bearingGain.gain.value = 0;
+    this.bearingFilter.connect(this.bearingGain);
+    this.bearingGain.connect(this.bearingBus);
+
+    this.bearingSource = ctx.createBufferSource();
+    this.bearingSource.buffer = noiseBuffer;
+    this.bearingSource.loop = true;
+    this.bearingSource.connect(this.bearingFilter);
+    this.bearingSource.start();
 
     // --- Exhaust system ---
     this.exhaustSystem = new ExhaustSystem(ctx, noiseBuffer, defaultExhaustConfig());
@@ -250,18 +282,31 @@ export class EngineSynthesizer {
 
     // --- Build channel registry ---
     this._channels = [
-      { id: "combustion", label: "Combustion", color: "#ef4444", enabled: true, volume: 1.0, gainNode: this.combustionBus },
-      { id: "exhaust",    label: "Exhaust",    color: "#f97316", enabled: true, volume: 1.0, gainNode: this.exhaustSystem.getOutput() },
-      { id: "intake",     label: "Intake",     color: "#60a5fa", enabled: true, volume: 1.0, gainNode: this.intakeGain },
-      { id: "valve",      label: "Valve Train", color: "#fbbf24", enabled: true, volume: 1.0, gainNode: this.valveBus },
-      { id: "piston",     label: "Piston",     color: "#a78bfa", enabled: true, volume: 1.0, gainNode: this.pistonGain },
-      { id: "compression", label: "Compression", color: "#38bdf8", enabled: true, volume: 1.0, gainNode: this.compGain },
+      { id: "combustion",  label: "Combustion",  color: "#ef4444", enabled: true, volume: 1.0, gainNode: this.combustionBus, analyser: null },
+      { id: "exhaust",     label: "Exhaust",     color: "#f97316", enabled: true, volume: 1.0, gainNode: this.exhaustSystem.getOutput(), analyser: null },
+      { id: "intake",      label: "Intake",      color: "#60a5fa", enabled: true, volume: 1.0, gainNode: this.intakeSystem.getOutput(), analyser: null },
+      { id: "valve",       label: "Valve Train", color: "#fbbf24", enabled: true, volume: 1.0, gainNode: this.valveBus, analyser: null },
+      { id: "piston",      label: "Piston",      color: "#a78bfa", enabled: true, volume: 1.0, gainNode: this.pistonGain, analyser: null },
+      { id: "compression", label: "Compression", color: "#38bdf8", enabled: true, volume: 1.0, gainNode: this.compGain, analyser: null },
+      { id: "mechanical",  label: "Mechanical",  color: "#94a3b8", enabled: true, volume: 1.0, gainNode: this.bearingBus, analyser: null },
     ];
+
+    // --- Insert AnalyserNode per channel (between gainNode and masterGain) ---
+    for (const ch of this._channels) {
+      if (ch.gainNode && this.ctx) {
+        const analyser = this.ctx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0;
+        ch.gainNode.disconnect();
+        ch.gainNode.connect(analyser);
+        analyser.connect(this.masterGain!);
+        ch.analyser = analyser;
+      }
+    }
 
     this.initialized = true;
     this.prevCombPerCyl = [];
-    this.prevIntakeLift = [];
-    this.prevExhaustLift = [];
+    this.prevClickSpeedPerCyl = [];
     console.log("[strepitus] Audio synthesizer initialized");
   }
 
@@ -282,16 +327,14 @@ export class EngineSynthesizer {
     const tau = 0.03;
     const rpm = Math.max(params.rpm, 100);
     const baseFreq = Math.max(params.cycle_frequency, 5);
-    const cyls = params.cylinders;
+    const cyls = params.cylinders as CylinderAudioExtended[];
     const n = cyls.length;
 
-    // Grow/shrink per-cylinder trackers if cylinder count changed
+    // Grow / shrink per-cylinder trackers
     while (this.prevCombPerCyl.length < n) this.prevCombPerCyl.push(0);
     if (this.prevCombPerCyl.length > n) this.prevCombPerCyl.length = n;
-    while (this.prevIntakeLift.length < n) this.prevIntakeLift.push(0);
-    if (this.prevIntakeLift.length > n) this.prevIntakeLift.length = n;
-    while (this.prevExhaustLift.length < n) this.prevExhaustLift.push(0);
-    if (this.prevExhaustLift.length > n) this.prevExhaustLift.length = n;
+    while (this.prevClickSpeedPerCyl.length < n) this.prevClickSpeedPerCyl.push(0);
+    if (this.prevClickSpeedPerCyl.length > n) this.prevClickSpeedPerCyl.length = n;
 
     // --- Combustion: per-cylinder firing detection ---
     if (this.channelEnabled("combustion")) {
@@ -314,7 +357,6 @@ export class EngineSynthesizer {
           const peakGain = Math.min(ci * 0.5, 0.6) / Math.sqrt(n) * combVol;
           const harmGains = [1.0, 0.6, 0.35, 0.2];
 
-          // Oscillator envelopes — use cancelAndHoldAtTime for additive stacking
           for (let i = 0; i < 4; i++) {
             const g = this.combGains[i].gain;
             if (typeof g.cancelAndHoldAtTime === "function") {
@@ -330,7 +372,6 @@ export class EngineSynthesizer {
             g.exponentialRampToValueAtTime(0.001, fireT + attackTime + decayTime);
           }
 
-          // Noise burst for crackly texture
           const ng = this.combNoiseGain!.gain;
           if (typeof ng.cancelAndHoldAtTime === "function") {
             ng.cancelAndHoldAtTime(fireT);
@@ -358,32 +399,72 @@ export class EngineSynthesizer {
       this.combOsc[i].frequency.setTargetAtTime(subFreq * freqMul[i], t, tau);
     }
 
-    // --- Intake air rush: max intake_valve_lift across all cylinders ---
-    let maxIntake = 0;
-    for (let c = 0; c < n; c++) {
-      if (cyls[c].intake_valve_lift > maxIntake) maxIntake = cyls[c].intake_valve_lift;
+    // --- Intake system: IntakeSystem.update() with runner and filter params ---
+    if (this.intakeSystem && this.channelEnabled("intake")) {
+      this.intakeSystem.update(
+        rpm,
+        cyls,
+        this.channelVolume("intake"),
+        params.runner_length_m,
+        params.filter_type,
+      );
     }
-    const intakeVol = this.channelVolume("intake");
-    const intakeLevel = this.channelEnabled("intake") ? maxIntake * 0.2 * intakeVol : 0;
-    this.intakeGain!.gain.setTargetAtTime(intakeLevel, t, 0.01);
 
-    const intakeCutoff = 800 + (rpm / 6000) * 600;
-    this.intakeFilter!.frequency.setTargetAtTime(intakeCutoff, t, tau);
+    // --- Valve Train: closing-speed impulse (seat impact) ---
+    if (this.channelEnabled("valve")) {
+      const valveVol = this.channelVolume("valve");
 
-    // --- Mechanical noise ---
-    const mechLevel = params.mechanical_noise;
+      for (let c = 0; c < n; c++) {
+        const clickSpeed = Math.max(
+          cyls[c].intake_closing_speed ?? 0,
+          cyls[c].exhaust_closing_speed ?? 0,
+        );
+        const prev = this.prevClickSpeedPerCyl[c];
 
-    const valveVol = this.channelVolume("valve");
-    const valveLevel = this.channelEnabled("valve") ? mechLevel * 0.12 * valveVol : 0;
-    this.valveGain!.gain.setTargetAtTime(valveLevel, t, tau);
-    const valveFreq = 3000 + (rpm / 6000) * 1000;
-    this.valveFilter!.frequency.setTargetAtTime(valveFreq, t, tau);
+        if (clickSpeed > 0.5 && prev <= 0.5) {
+          // Rising edge — seat impact
+          const amplitude = Math.min(clickSpeed / 5, 1) * 0.08 * valveVol / Math.sqrt(n);
+          const g = this.valveClickGain!.gain;
+          g.cancelScheduledValues(t);
+          g.setValueAtTime(amplitude, t);
+          // Sharp click: 0.1 ms attack already done, 1.5 ms decay
+          g.exponentialRampToValueAtTime(0.001, t + 0.0015);
+        }
+        this.prevClickSpeedPerCyl[c] = clickSpeed;
+      }
 
-    const pistonVol = this.channelVolume("piston");
-    const pistonLevel = this.channelEnabled("piston") ? mechLevel * 0.08 * pistonVol : 0;
-    this.pistonGain!.gain.setTargetAtTime(pistonLevel, t, tau);
-    const pistonFreq = 1000 + (rpm / 6000) * 500;
-    this.pistonFilter!.frequency.setTargetAtTime(pistonFreq, t, tau);
+      // Residual valve train noise (structural resonance) from mechLevel
+      const mechLevel = params.mechanical_noise;
+      const valveLevel = mechLevel * 0.06 * valveVol;
+      this.valveGain!.gain.setTargetAtTime(valveLevel, t, tau);
+      const valveFreq = 3000 + (rpm / 6000) * 1000;
+      this.valveFilter!.frequency.setTargetAtTime(valveFreq, t, tau);
+    } else {
+      this.valveGain!.gain.setTargetAtTime(0, t, 0.02);
+      this.valveClickGain!.gain.setTargetAtTime(0, t, 0.02);
+      for (let c = 0; c < n; c++) {
+        this.prevClickSpeedPerCyl[c] = Math.max(
+          cyls[c].intake_closing_speed ?? 0,
+          cyls[c].exhaust_closing_speed ?? 0,
+        );
+      }
+    }
+
+    // --- Piston: conrod side force amplitude ---
+    if (this.channelEnabled("piston")) {
+      const pistonVol = this.channelVolume("piston");
+      let maxSideForce = 0;
+      for (let c = 0; c < n; c++) {
+        const sf = cyls[c].piston_side_force ?? 0;
+        if (sf > maxSideForce) maxSideForce = sf;
+      }
+      const pistonLevel = Math.min(maxSideForce * 0.15, 0.12) * pistonVol;
+      this.pistonGain!.gain.setTargetAtTime(pistonLevel, t, tau);
+      const pistonFreq = 1000 + (rpm / 6000) * 500;
+      this.pistonFilter!.frequency.setTargetAtTime(pistonFreq, t, tau);
+    } else {
+      this.pistonGain!.gain.setTargetAtTime(0, t, 0.02);
+    }
 
     // --- Compression whoosh ---
     if (this.channelEnabled("compression")) {
@@ -398,40 +479,22 @@ export class EngineSynthesizer {
       const compRatio = Math.max(0, (maxCompPressure / ATM - 1) / 20);
       const compLevel = Math.min(compRatio * 0.04, 0.04) * compVol;
       this.compGain!.gain.setTargetAtTime(compLevel, t, 0.05);
-
       const compFreq = 200 + (rpm / 6000) * 200;
       this.compFilter!.frequency.setTargetAtTime(compFreq, t, tau);
     } else {
       this.compGain!.gain.setTargetAtTime(0, t, 0.02);
     }
 
-    // --- Valve clicks ---
-    const clickThreshold = 0.0005; // 0.5mm
-    let clickCount = 0;
-    for (let c = 0; c < n; c++) {
-      const il = cyls[c].intake_valve_lift;
-      const el = cyls[c].exhaust_valve_lift;
-      const pil = this.prevIntakeLift[c];
-      const pel = this.prevExhaustLift[c];
-
-      // Detect threshold crossing in either direction
-      if ((il > clickThreshold && pil <= clickThreshold) || (il <= clickThreshold && pil > clickThreshold)) {
-        clickCount++;
-      }
-      if ((el > clickThreshold && pel <= clickThreshold) || (el <= clickThreshold && pel > clickThreshold)) {
-        clickCount++;
-      }
-
-      this.prevIntakeLift[c] = il;
-      this.prevExhaustLift[c] = el;
-    }
-
-    if (clickCount > 0) {
-      const clickGain = (clickCount / Math.sqrt(n)) * 0.06;
-      const g = this.valveClickGain!.gain;
-      g.cancelScheduledValues(t);
-      g.setValueAtTime(clickGain, t);
-      g.exponentialRampToValueAtTime(0.001, t + 0.003);
+    // --- Mechanical (bearing whine): bearing_noise scalar ---
+    if (this.channelEnabled("mechanical")) {
+      const mechVol = this.channelVolume("mechanical");
+      const bearingLevel = Math.min(params.bearing_noise, 1) * 0.08 * mechVol;
+      this.bearingGain!.gain.setTargetAtTime(bearingLevel, t, tau);
+      // Bearing whine frequency rises with RPM
+      const bearingFreq = 4000 + (rpm / 8000) * 3000;
+      this.bearingFilter!.frequency.setTargetAtTime(bearingFreq, t, tau);
+    } else {
+      this.bearingGain!.gain.setTargetAtTime(0, t, 0.02);
     }
 
     // --- Exhaust system ---
@@ -481,8 +544,13 @@ export class EngineSynthesizer {
     return this._channels.map(({ id, label, color, enabled, volume }) => ({ id, label, color, enabled, volume }));
   }
 
-  /** Channels whose gainNode is a bus (not modulated in update loop). */
-  private static BUS_CHANNELS = new Set(["combustion", "valve", "exhaust"]);
+  /** Returns channels with their AnalyserNodes for scope/waveform visualization. */
+  getChannelsWithAnalysers(): { id: string; label: string; color: string; analyser: AnalyserNode | null }[] {
+    return this._channels.map(({ id, label, color, analyser }) => ({ id, label, color, analyser }));
+  }
+
+  /** Bus channels whose gainNode is a bus (restore volume on re-enable, not modulated in update). */
+  private static BUS_CHANNELS = new Set(["combustion", "valve", "exhaust", "intake", "mechanical"]);
 
   setChannelEnabled(channel: string, enabled: boolean): void {
     const ch = this._channels.find((c) => c.id === channel);
@@ -502,7 +570,6 @@ export class EngineSynthesizer {
     if (!ch) return;
     ch.volume = Math.max(0, Math.min(1, volume));
     if (ch.gainNode && this.ctx && ch.enabled) {
-      // Bus channels control gain directly; others are modulated as multipliers in update()
       if (EngineSynthesizer.BUS_CHANNELS.has(channel)) {
         ch.gainNode.gain.setTargetAtTime(ch.volume, this.ctx.currentTime, 0.02);
       }
@@ -520,14 +587,16 @@ export class EngineSynthesizer {
   dispose(): void {
     for (const osc of this.combOsc) osc.stop();
     this.combNoiseSource?.stop();
-    this.intakeSource?.stop();
     this.mechSource?.stop();
     this.compSource?.stop();
     this.valveClickSource?.stop();
+    this.bearingSource?.stop();
+    this.intakeSystem?.dispose();
     this.exhaustSystem?.dispose();
     this.ctx?.close();
     this.combOsc = [];
     this.combGains = [];
+    this.intakeSystem = null;
     this.exhaustSystem = null;
     this.initialized = false;
   }

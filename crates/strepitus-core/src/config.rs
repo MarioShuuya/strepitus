@@ -73,6 +73,11 @@ pub struct EngineConfig {
     pub throttle_diameter: f64,
     #[serde(default)]
     pub dyno_mode: u8,
+    // ── Intake acoustic ──
+    #[serde(default = "default_runner_length_mm")]
+    pub runner_length_mm: f64,    // intake runner length in mm — for IntakeSystem resonance freq
+    #[serde(default)]
+    pub intake_filter_type: u8,   // 0=stock (2500 Hz), 1=sport (4000 Hz), 2=open (6000 Hz)
     // ── Multi-cylinder ──
     #[wasm_bindgen(skip)]
     #[serde(default = "default_cylinder_count")]
@@ -86,6 +91,7 @@ fn default_cylinder_count() -> u8 { 1 }
 fn default_throttle_diameter() -> f64 { 0.044 }
 fn default_dyno_integral_gain() -> f64 { 0.5 }
 fn default_dyno_load_torque() -> f64 { 10.0 }
+fn default_runner_length_mm() -> f64 { 300.0 }
 
 #[wasm_bindgen]
 impl EngineConfig {
@@ -258,6 +264,7 @@ impl EngineConfig {
                 dyno_integral_gain: self.dyno_integral_gain,
                 dyno_load_torque: self.dyno_load_torque,
                 dyno_mode: self.dyno_mode,
+                target_rpm: 1000.0, // overwritten at runtime by Engine::set_rpm_target()
             },
         }
     }
@@ -299,6 +306,8 @@ impl Default for EngineConfig {
             dyno_load_torque: 10.0,
             throttle_diameter: 0.044,
             dyno_mode: 0,
+            runner_length_mm: 300.0,
+            intake_filter_type: 0,
             cylinder_count: 1,
             crank_offsets_deg: vec![],
         }
@@ -335,4 +344,6 @@ pub struct DynoConfig {
     pub dyno_integral_gain: f64,
     pub dyno_load_torque: f64,
     pub dyno_mode: u8,
+    /// Live target RPM for speed-PI mode — updated at runtime via Engine::set_rpm_target().
+    pub target_rpm: f64,
 }
